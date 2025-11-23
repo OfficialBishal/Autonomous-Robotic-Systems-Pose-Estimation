@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Arguments -->
+  <arg name="mesh_file" default="$(find final-project-OfficialBishal)/meshes/mustard.obj" />
+  <arg name="rgb_topic" default="/hsrb/head_rgbd_sensor/rgb/image_rect_color" />
+  <arg name="depth_topic" default="/hsrb/head_rgbd_sensor/depth_registered/image_rect_raw" />
+  <arg name="camera_info_topic" default="/hsrb/head_rgbd_sensor/rgb/camera_info" />
+  <arg name="frame_id" default="head_rgbd_sensor_rgb_frame" />
+  <arg name="object_frame_id" default="object_pose" />
+  
+  <!-- FoundationPose parameters -->
+  <arg name="est_refine_iter" default="5" />
+  <arg name="track_refine_iter" default="2" />
+  <arg name="debug" default="1" />
+  <arg name="use_mask" default="false" />
+  <arg name="mask_topic" default="" />
+  
+  <!-- FoundationPose Pose Estimation node -->
+  <!-- Note: This node requires the foundationpose conda environment -->
+  <!-- Use the wrapper script: scripts/run_foundationpose.sh -->
+  <node name="foundationpose_pose_estimation" 
+        pkg="final-project-OfficialBishal" 
+        type="run_foundationpose.sh" 
+        output="screen">
+    <param name="mesh_file" value="$(arg mesh_file)" />
+    <param name="rgb_topic" value="$(arg rgb_topic)" />
+    <param name="depth_topic" value="$(arg depth_topic)" />
+    <param name="camera_info_topic" value="$(arg camera_info_topic)" />
+    <param name="frame_id" value="$(arg frame_id)" />
+    <param name="object_frame_id" value="$(arg object_frame_id)" />
+    <param name="est_refine_iter" value="$(arg est_refine_iter)" />
+    <param name="track_refine_iter" value="$(arg track_refine_iter)" />
+    <param name="debug" value="$(arg debug)" />
+    <param name="use_mask" value="$(arg use_mask)" />
+    <param name="mask_topic" value="$(arg mask_topic)" />
+    
+    <!-- Set environment to use foundationpose conda environment -->
+    <env name="CONDA_DEFAULT_ENV" value="foundationpose" />
+    <!-- Force conda's libffi.so.7 to be preloaded to fix cv_bridge conflicts -->
+    <!-- libp11-kit is linked against libffi.so.7, so we need to preload that version -->
+    <env name="LD_PRELOAD" value="/home/csc752/.conda/envs/foundationpose/lib/libffi.so.7" />
+    <!-- Ensure conda's lib directory is first in LD_LIBRARY_PATH so libp11-kit finds conda's libffi -->
+    <!-- The script will add to this, but we need to ensure conda lib is first -->
+    <env name="LD_LIBRARY_PATH" value="/home/csc752/.conda/envs/foundationpose/lib" />
+  </node>
+</launch>
+

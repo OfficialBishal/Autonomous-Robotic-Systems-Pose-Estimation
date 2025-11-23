@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Arguments -->
+  <arg name="prefix" default="/hsrb" />
+  <arg name="dope_config" default="$(find final-project-OfficialBishal)/config/dope_config.yaml" />
+  
+  <!-- DOPE node -->
+  <node name="dope" pkg="dope" type="dope" output="screen" clear_params="true">
+    <rosparam file="$(arg dope_config)"/>
+  </node>
+
+  <!-- Launch Rviz -->
+  <!-- <node name="rviz" pkg="rviz" type="rviz" args="-d $(find final-project-OfficialBishal)/rviz/final-project-rviz.rviz" output="screen"/> -->
+</launch>

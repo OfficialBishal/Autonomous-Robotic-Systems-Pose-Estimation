@@ -1,0 +1,39 @@
+# Minimal working model file for OpenCV pose estimation
+# This file allows the node to run, but you'll need real 3D coordinates for actual tracking
+# The descriptors here are placeholders - in practice, extract them from a reference image
+
+points:
+  # Placeholder points - these won't match real objects but allow the code to run
+  # To make it work for real: replace with actual 3D points and ORB descriptors from your object
+  - x: 0.0
+    y: 0.0
+    z: 0.0
+    descriptor: [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0]
+  - x: 0.1
+    y: 0.0
+    z: 0.0
+    descriptor: [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+  - x: 0.0
+    y: 0.1
+    z: 0.0
+    descriptor: [1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0]
+  - x: 0.0
+    y: 0.0
+    z: 0.1
+    descriptor: [0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1]
+  - x: 0.1
+    y: 0.1
+    z: 0.0
+    descriptor: [1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1]
+  - x: 0.1
+    y: 0.0
+    z: 0.1
+    descriptor: [0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0]
+  - x: 0.0
+    y: 0.1
+    z: 0.1
+    descriptor: [1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1]
+  - x: 0.1
+    y: 0.1
+    z: 0.1
+    descriptor: [0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0]

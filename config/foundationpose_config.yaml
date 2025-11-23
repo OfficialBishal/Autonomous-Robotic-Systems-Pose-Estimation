@@ -1,0 +1,34 @@
+# FoundationPose Configuration
+# This file contains default mesh paths and parameters for FoundationPose pose estimation
+
+# Mesh file paths (update these to point to your object meshes)
+meshes:
+  mustard: "$(find final-project-OfficialBishal)/meshes/mustard.obj"
+  # Add more objects here as needed
+  # object_name: "$(find final-project-OfficialBishal)/meshes/object_name.obj"
+
+# Camera topics (default for HSR robot in Isaac Sim)
+camera:
+  rgb_topic: "/hsrb/head_rgbd_sensor/rgb/image_rect_color"
+  depth_topic: "/hsrb/head_rgbd_sensor/depth_registered/image_rect_raw"
+  camera_info_topic: "/hsrb/head_rgbd_sensor/rgb/camera_info"
+  frame_id: "head_rgbd_sensor_rgb_frame"
+
+# FoundationPose parameters
+foundationpose:
+  # Number of refinement iterations for initial pose estimation
+  est_refine_iter: 5
+  
+  # Number of refinement iterations for tracking
+  track_refine_iter: 2
+  
+  # Debug level (0=off, 1=basic, 2=detailed, 3=verbose)
+  debug: 1
+  
+  # Use object mask for segmentation (requires mask_topic)
+  use_mask: false
+  mask_topic: ""
+
+# Object frame ID for TF publishing
+object_frame_id: "object_pose"
+
