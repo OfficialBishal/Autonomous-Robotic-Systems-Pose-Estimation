@@ -72,7 +72,7 @@ parser = argparse.ArgumentParser(description="Final Project World Setup")
 parser.add_argument(
     "--robot_spawn_pos_xyz", 
     type=str, 
-    default='[3, 3, 0.01]', 
+    default='[3, 3.5, 0.01]', 
     help="Robot spawn position as xyz list."
 )
 parser.add_argument(
@@ -86,9 +86,9 @@ args, unknown_args = parser.parse_known_args()
 # World configuration constants
 TABLE_POSITION = [3, 4]  # Grid coordinates (x, y)
 TABLE_HEIGHT = 0.1  # Table base height in meters
-MUSTARD_HEIGHT_ABOVE_TABLE = 0.5  # Mustard bottle height above table in meters (when upright)
+MUSTARD_HEIGHT_ABOVE_TABLE = 0.5  # Mustard bottle height above table in meters (when upright) - reduced for stability
 MUSTARD_LYING_HEIGHT = 0.05  # Height when lying flat (half the width/diameter)
-HEAD_TILT_ANGLE = -0.5  # Head tilt angle in radians (negative = down)
+HEAD_TILT_ANGLE = -0.8  # Head tilt angle in radians (negative = down)
 ARM_ROLL_JOINT_ANGLE = -1.57  # Arm roll joint angle in radians
 WRIST_FLEX_JOINT_ANGLE = -1.57  # Wrist flex joint angle in radians
 
@@ -351,6 +351,7 @@ class final_project_world_2(robocanes_isaac_world):
     def add_table_at_grid(self, grid_x, grid_y):
         """
         Add a coffee table at the specified grid coordinates.
+        Table is oriented horizontally (aligned to grid axes) with front facing the robot.
         
         Args:
             grid_x: Grid X coordinate (in meters)
@@ -358,11 +359,17 @@ class final_project_world_2(robocanes_isaac_world):
         """
         table_usd = os.path.join(usd_repo_path, 'robocanes_lab', 'robocanes_lab', 'coffeeTable.usd')
         
+        # Set table to horizontal orientation (aligned to grid axes)
+        # The coffeeTable.usd model appears to have a default 45-degree rotation
+        # Compensate by rotating -45 degrees to align table edges with X/Y axes
+        # This ensures the table is horizontal (not diagonal) for easier robot approach
+        table_yaw = 0#-np.pi / 4  # -45 degrees to compensate for model's default rotation
+        
         table_prim = prims.create_prim(
             prim_path=f'/World/Props/coffee_table',
             usd_path=table_usd,
             translation=[grid_x, grid_y, TABLE_HEIGHT],
-            orientation=euler_angles_to_quat([0.0, 0.0, 0.0]),  # Default orientation
+            orientation=euler_angles_to_quat([0.0, 0.0, table_yaw]),  # Horizontal orientation
             scale=[1, 1, 1],
             semantic_label='coffee_table'
         )
@@ -372,7 +379,24 @@ class final_project_world_2(robocanes_isaac_world):
         if physx_utils is None:
             from omni.physx.scripts import utils as physx_utils
         physx_utils.setCollider(prim=table_prim, approximationShape='sdfMesh')
-        print(f'[WORLD] Added table at grid location ({grid_x}, {grid_y}) with default orientation')
+        
+        # Make table kinematic (non-movable) so it doesn't rotate or move
+        # This prevents the table from rotating after mustard is placed
+        try:
+            from pxr import UsdPhysics
+            # Apply RigidBodyAPI and set as kinematic
+            rigid_body_api = UsdPhysics.RigidBodyAPI.Apply(table_prim)
+            if rigid_body_api:
+                # Set as kinematic so it doesn't move/rotate
+                rigid_body_api.CreateKinematicEnabledAttr(True)
+                print(f'[WORLD] Set table as kinematic (non-movable)')
+        except Exception as e:
+            print(f'[WORLD] Warning: Could not set table as kinematic: {e}')
+        
+        # Store table prim reference to ensure orientation doesn't change
+        self.table_prim = table_prim
+        
+        print(f'[WORLD] Added table at grid location ({grid_x}, {grid_y}) with horizontal orientation yaw={table_yaw:.3f} rad ({np.degrees(table_yaw):.1f} deg)')
     
     def add_mustard_on_table(self, grid_x, grid_y):
         """
@@ -410,7 +434,23 @@ class final_project_world_2(robocanes_isaac_world):
         if physx_utils is None:
             from omni.physx.scripts import utils as physx_utils
         physx_utils.setCollider(prim=mustard_prim, approximationShape='sdfMesh')
+        
+        # Create rigid body for mustard bottle
         RigidPrim(prim_path=str(mustard_prim.GetPrimPath()), name='mustard_bottle')
+        
+        # Set mustard bottle mass to prevent it from falling through table
+        # Also ensure it's not kinematic so it can be picked up later
+        try:
+            from pxr import UsdPhysics
+            rigid_body_api = UsdPhysics.RigidBodyAPI.Apply(mustard_prim)
+            if rigid_body_api:
+                # Set reasonable mass (in kg) - not too light, not too heavy
+                mass_api = UsdPhysics.MassAPI.Apply(mustard_prim)
+                if mass_api:
+                    mass_api.CreateMassAttr(0.5)  # 0.5 kg - reasonable for a mustard bottle
+                    print(f'[WORLD] Set mustard bottle mass to 0.5 kg')
+        except Exception as e:
+            print(f'[WORLD] Warning: Could not set mustard bottle mass: {e}')
         
         # Store mustard prim for later pose publishing
         self.mustard_prim = mustard_prim
@@ -554,7 +594,7 @@ class final_project_world_2(robocanes_isaac_world):
             
             # Debug: Log first successful publish only
             if not hasattr(self, '_gt_first_publish_logged'):
-                print(f"[WORLD] ✓ Published first ground truth pose (in {gt_pose.header.frame_id} frame): pos=[{gt_pose.pose.position.x:.3f}, {gt_pose.pose.position.y:.3f}, {gt_pose.pose.position.z:.3f}], "
+                print(f"[WORLD] Published first ground truth pose (in {gt_pose.header.frame_id} frame): pos=[{gt_pose.pose.position.x:.3f}, {gt_pose.pose.position.y:.3f}, {gt_pose.pose.position.z:.3f}], "
                       f"orient=[{gt_pose.pose.orientation.x:.3f}, {gt_pose.pose.orientation.y:.3f}, {gt_pose.pose.orientation.z:.3f}, {gt_pose.pose.orientation.w:.3f}]", flush=True)
                 self._gt_first_publish_logged = True
             
@@ -654,6 +694,19 @@ if __name__ == '__main__':
                 print('[WORLD] ISAAC WORLD ONETIME PLAY!!!')
                 print('[WORLD] ISAAC WORLD ONETIME PLAY!!!', flush=True)
                 sim_world_onetime_trigger = False
+                
+                # Ensure table orientation is locked after simulation starts
+                # This prevents any physics or other systems from rotating the table
+                if hasattr(world, 'table_prim') and world.table_prim:
+                    try:
+                        # Re-apply kinematic setting to ensure table doesn't move
+                        from pxr import UsdPhysics
+                        rigid_body_api = UsdPhysics.RigidBodyAPI.Apply(world.table_prim)
+                        if rigid_body_api:
+                            rigid_body_api.CreateKinematicEnabledAttr(True)
+                            print('[WORLD] Locked table orientation after simulation start')
+                    except Exception as e:
+                        print(f'[WORLD] Warning: Could not lock table orientation: {e}')
             
             # Set head tilt after simulation starts when articulation is available
             if not head_tilt_set and hasattr(world, '_pending_head_tilt') and world._pending_head_tilt is not None:

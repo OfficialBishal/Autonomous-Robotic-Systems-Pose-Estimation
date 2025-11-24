@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Load configuration file into each node's namespace -->
+  <!-- Config file contains all parameters for both SAM and FoundationPose nodes -->
+  
+  <!-- SAM Segmentation Node -->
+  <!-- This node runs in the 'sam' conda environment -->
+  <node name="sam_segmentation" 
+        pkg="final-project-OfficialBishal" 
+        type="run_sam_segmentation.sh" 
+        output="screen">
+    <!-- Load config file into this node's namespace -->
+    <rosparam file="$(find final-project-OfficialBishal)/config/foundationpose_config.yaml" command="load" />
+    <!-- Set environment to use sam conda environment -->
+    <env name="CONDA_DEFAULT_ENV" value="sam" />
+  </node>
+  
+  <!-- FoundationPose Pose Estimation node -->
+  <!-- This node runs in the 'foundationpose' conda environment -->
+  <!-- It subscribes to the mask topic from SAM -->
+  <node name="foundationpose_pose_estimation" 
+        pkg="final-project-OfficialBishal" 
+        type="run_foundationpose.sh" 
+        output="screen">
+    <!-- Load config file into this node's namespace -->
+    <rosparam file="$(find final-project-OfficialBishal)/config/foundationpose_config.yaml" command="load" />
+    <!-- Set environment to use foundationpose conda environment -->
+    <env name="CONDA_DEFAULT_ENV" value="foundationpose" />
+    <!-- Force conda's libffi.so.7 to be preloaded to fix cv_bridge conflicts -->
+    <env name="LD_PRELOAD" value="/home/csc752/.conda/envs/foundationpose/lib/libffi.so.7" />
+    <env name="LD_LIBRARY_PATH" value="/home/csc752/.conda/envs/foundationpose/lib" />
+  </node>
+</launch>

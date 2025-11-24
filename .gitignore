@@ -1,0 +1,98 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Checkpoints and model files (too large for git)
+sam-checkpoints/
+*.pth
+*.pt
+*.ckpt
+*.pkl
+*.h5
+*.weights
+checkpoints/
+
+# ROS build artifacts
+build/
+devel/
+install/
+logs/
+.catkin_workspace
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Environment files
+.env
+.venv
+env/
+venv/
+ENV/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Log files
+*.log
+*.out
+*.err
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.swp
+
+# Large data files
+*.bag
+*.bag.active
+*.hdf5
+*.h5
+
+# Compiled files
+*.o
+*.a
+*.lib
+*.dll
+*.exe
+
+# YOLO downloaded models (auto-downloaded, don't commit)
+*.onnx
+yolov*.pt
+
+# Segment Anything checkpoints (downloaded separately)
+segment-anything/checkpoints/
+
+# FoundationPose debug output
+foundationpose_debug/
+*.png
+*.jpg
+!meshes/*.png
+!meshes/*.jpg
+
+# Test outputs
+test_outputs/
+results/
+

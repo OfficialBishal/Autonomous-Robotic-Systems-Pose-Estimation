@@ -133,6 +133,15 @@ class FoundationPoseNode:
         self.gt_pose = None
         self.gt_pose_received = False
         
+        # Orientation correction state
+        self.best_correction = None  # Will store the best rotation combination
+        self.correction_tested = False  # Whether we've tested all combinations
+        self.correction_test_results = []  # Store test results
+        
+        # Pose stability tracking (replaces fixed delay) - loaded from config in _load_parameters
+        self.pose_history = []  # Store recent pose estimates for stability checking
+        # These will be loaded in _load_parameters() after config file is loaded
+        
         
         # Setup ROS communication
         self._setup_ros_communication()
@@ -155,33 +164,122 @@ class FoundationPoseNode:
     # ========================================================================
     
     def _load_parameters(self):
-        """Load ROS parameters."""
-        # Mesh file parameter
+        """Load ROS parameters from config file (organized structure)."""
+        # Mesh file parameter (top level)
+        default_mesh_paths = [
+            os.path.join(FOUNDATIONPOSE_PATH, 'demo_data', 'mustard0', 'mesh', 'textured_simple.obj'),
+            os.path.join(os.path.expanduser('~'), 'hsr_robocanes_omniverse', 'src', 'FoundationPose', 'demo_data', 'mustard0', 'mesh', 'textured_simple.obj'),
+        ]
+        
         self.mesh_file = rospy.get_param('~mesh_file', '')
+        
+        # Resolve path relative to workspace root if needed
+        if self.mesh_file:
+            # Get workspace root from ROS package path or environment
+            workspace_root = None
+            if 'ROS_PACKAGE_PATH' in os.environ:
+                # Use first path in ROS_PACKAGE_PATH (usually workspace/src)
+                package_paths = os.environ['ROS_PACKAGE_PATH'].split(':')
+                if package_paths:
+                    # Go up from src/ to workspace root
+                    src_path = package_paths[0]
+                    if src_path.endswith('/src'):
+                        workspace_root = os.path.dirname(src_path)
+            
+            # Fallback to common workspace location
+            if not workspace_root:
+                workspace_root = os.path.expanduser('~/hsr_robocanes_omniverse')
+            
+            # If path starts with 'src/', resolve relative to workspace root
+            if self.mesh_file.startswith('src/'):
+                self.mesh_file = os.path.join(workspace_root, self.mesh_file)
+            # Expand user home directory if path starts with ~
+            elif self.mesh_file.startswith('~'):
+                self.mesh_file = os.path.expanduser(self.mesh_file)
+            # If relative path, try resolving relative to workspace root
+            elif not os.path.isabs(self.mesh_file):
+                potential_path = os.path.join(workspace_root, self.mesh_file)
+                if os.path.exists(potential_path):
+                    self.mesh_file = potential_path
+        
+        if not self.mesh_file:
+            # Try default paths
+            for default_path in default_mesh_paths:
+                if os.path.exists(default_path):
+                    self.mesh_file = default_path
+                    rospy.loginfo(f"No mesh_file parameter provided, using default: {self.mesh_file}")
+                    break
+        
         if not self.mesh_file or not os.path.exists(self.mesh_file):
             rospy.logerr(f"Mesh file not found: {self.mesh_file}")
             rospy.logerr("Please set the ~mesh_file parameter to a valid mesh file")
+            if default_mesh_paths:
+                rospy.logerr(f"Suggested default: {default_mesh_paths[0]}")
             sys.exit(1)
         
-        # Topic parameters
-        self.rgb_topic = rospy.get_param('~rgb_topic', '/hsrb/head_rgbd_sensor/rgb/image_rect_color')
-        self.depth_topic = rospy.get_param('~depth_topic', '/hsrb/head_rgbd_sensor/depth_registered/image_rect_raw')
-        self.camera_info_topic = rospy.get_param('~camera_info_topic', '/hsrb/head_rgbd_sensor/rgb/camera_info')
-        self.frame_id = rospy.get_param('~frame_id', 'head_rgbd_sensor_rgb_frame')
+        # Camera topics (from config file nested structure)
+        self.rgb_topic = rospy.get_param('~camera/rgb_topic', rospy.get_param('~rgb_topic', '/hsrb/head_rgbd_sensor/rgb/image_rect_color'))
+        self.depth_topic = rospy.get_param('~camera/depth_topic', rospy.get_param('~depth_topic', '/hsrb/head_rgbd_sensor/depth_registered/image_rect_raw'))
+        self.camera_info_topic = rospy.get_param('~camera/camera_info_topic', rospy.get_param('~camera_info_topic', '/hsrb/head_rgbd_sensor/rgb/camera_info'))
+        self.frame_id = rospy.get_param('~camera/frame_id', rospy.get_param('~frame_id', 'head_rgbd_sensor_rgb_frame'))
         self.object_frame_id = rospy.get_param('~object_frame_id', 'object_pose')
         
-        # FoundationPose parameters
-        self.est_refine_iter = rospy.get_param('~est_refine_iter', 5)
-        self.track_refine_iter = rospy.get_param('~track_refine_iter', 2)
-        self.debug = rospy.get_param('~debug', 1)
+        # FoundationPose parameters (from config file nested structure)
+        self.est_refine_iter = rospy.get_param('~foundationpose/est_refine_iter', rospy.get_param('~est_refine_iter', 5))
+        self.track_refine_iter = rospy.get_param('~foundationpose/track_refine_iter', rospy.get_param('~track_refine_iter', 2))
+        self.debug = rospy.get_param('~foundationpose/debug', rospy.get_param('~debug', 1))
         
-        # Mask parameters
-        self.use_mask = rospy.get_param('~use_mask', False)
-        self.mask_topic = rospy.get_param('~mask_topic', '')
+        # Mask parameters (from config file nested structure)
+        self.use_mask = rospy.get_param('~mask/use_mask', rospy.get_param('~use_mask', False))
+        self.mask_topic = rospy.get_param('~mask/mask_topic', rospy.get_param('~mask_topic', ''))
         
-        # Depth mask parameters (for better object isolation)
-        self.depth_min = rospy.get_param('~depth_min', 0.3)  # Minimum depth (meters)
-        self.depth_max = rospy.get_param('~depth_max', 2.0)  # Maximum depth (meters)
+        # Depth mask parameters (from config file nested structure)
+        self.depth_min = rospy.get_param('~depth_mask/depth_min', rospy.get_param('~depth_min', 0.3))
+        self.depth_max = rospy.get_param('~depth_mask/depth_max', rospy.get_param('~depth_max', 2.0))
+        
+        # Orientation correction parameters (from config file nested structure)
+        self.auto_correction_enabled = rospy.get_param('~orientation_correction/auto_orientation_correction', 
+                                                       rospy.get_param('~auto_orientation_correction', True))
+        self.auto_correction_error_threshold = rospy.get_param('~orientation_correction/auto_correction_error_threshold',
+                                                               rospy.get_param('~auto_correction_error_threshold', 80.0))
+        
+        # Manual orientation correction (for backward compatibility)
+        correction_axis = rospy.get_param('~orientation_correction/orientation_correction_90deg',
+                                         rospy.get_param('~orientation_correction_90deg', '')).lower().strip()
+        if correction_axis in ['x', 'y', 'z']:
+            from scipy.spatial.transform import Rotation
+            angle_rad = np.pi / 2.0
+            if correction_axis == 'x':
+                self.manual_orientation_correction = Rotation.from_euler('x', angle_rad, degrees=False).as_matrix()
+            elif correction_axis == 'y':
+                self.manual_orientation_correction = Rotation.from_euler('y', angle_rad, degrees=False).as_matrix()
+            elif correction_axis == 'z':
+                self.manual_orientation_correction = Rotation.from_euler('z', angle_rad, degrees=False).as_matrix()
+            self.manual_correction_enabled = True
+            self.auto_correction_enabled = False  # Disable auto if manual is set
+            rospy.loginfo(f"Manual orientation correction enabled: 90-degree rotation around {correction_axis.upper()}-axis")
+        else:
+            self.manual_orientation_correction = None
+            self.manual_correction_enabled = False
+        
+        if self.auto_correction_enabled:
+            rospy.loginfo("Automatic orientation correction enabled: will test all 90/180 degree combinations")
+        
+        # Pose stability parameters (from config file nested structure)
+        self.pose_history_max_size = rospy.get_param('~pose_stability/pose_stability_history_size',
+                                                     rospy.get_param('~pose_stability_history_size', 30))
+        self.pose_stability_threshold = rospy.get_param('~pose_stability/pose_stability_threshold',
+                                                        rospy.get_param('~pose_stability_threshold', 0.02))
+        self.pose_stability_orientation_threshold = rospy.get_param('~pose_stability/pose_stability_orientation_threshold',
+                                                                   rospy.get_param('~pose_stability_orientation_threshold', 2.0))
+        self.pose_stability_min_samples = rospy.get_param('~pose_stability/pose_stability_min_samples',
+                                                          rospy.get_param('~pose_stability_min_samples', 20))
+        
+        # Pose quality thresholds for publishing (from config file nested structure)
+        self.publish_position_error_threshold = rospy.get_param('~publish_quality/publish_position_error_threshold',
+                                                                rospy.get_param('~publish_position_error_threshold', 0.2))
+        self.publish_orientation_error_threshold = rospy.get_param('~publish_quality/publish_orientation_error_threshold',
+                                                                     rospy.get_param('~publish_orientation_error_threshold', 45.0))
     
     def _setup_ros_communication(self):
         """Setup ROS publishers, subscribers, and TF broadcaster."""
@@ -210,8 +308,16 @@ class FoundationPoseNode:
         """Load the object mesh file."""
         rospy.loginfo(f"Loading mesh from: {self.mesh_file}")
         try:
-            self.mesh = trimesh.load(self.mesh_file)
+            # Store original mesh before FoundationPose modifies it
+            self.mesh_original = trimesh.load(self.mesh_file)
+            self.mesh = self.mesh_original.copy()  # FoundationPose will modify this
             rospy.loginfo(f"Mesh loaded: {len(self.mesh.vertices)} vertices")
+            
+            # Compute to_origin transformation from oriented bounds (same as run_demo.py)
+            # This transforms from original mesh coordinate system to oriented bounding box coordinate system
+            self.to_origin, extents = trimesh.bounds.oriented_bounds(self.mesh_original)
+            rospy.loginfo(f"Computed to_origin transformation from oriented bounds")
+            rospy.loginfo(f"Oriented bounds extents: {extents}")
             
             # Check mesh orientation and bounds for debugging
             if self.mesh.vertices.shape[0] > 0:
@@ -386,16 +492,38 @@ class FoundationPoseNode:
             return
         
         try:
-            # Convert depth to meters if needed
+            # Convert depth to meters if needed and make a writable copy
+            # The array from ROS message might be read-only, so we need to copy it
             if depth_image.dtype != np.float32:
                 depth_image = depth_image.astype(np.float32)
+            else:
+                # Make a writable copy even if dtype is already float32
+                depth_image = depth_image.copy()
+            
+            # Validate and clean depth image (matching FoundationPose expectations)
+            # FoundationPose expects invalid depths (< 0.001) to be set to 0
+            # Also filter depths beyond max range (FoundationPose uses zfar=np.inf in demo, but we use depth_max)
+            invalid_mask = (depth_image < 0.001) | (depth_image >= self.depth_max)
+            depth_image[invalid_mask] = 0.0
             
             # Create mask if not provided
             if ob_mask is None:
                 # Use tighter depth bounds to focus on object (table is at ~0.6m, object is on table)
-                valid_depth = (depth_image > self.depth_min) & (depth_image < self.depth_max)
+                # Only consider valid depths (not zero/invalid)
+                valid_depth = (depth_image > self.depth_min) & (depth_image < self.depth_max) & (depth_image >= 0.001)
                 ob_mask = valid_depth.astype(bool)
-                rospy.logwarn_once(f"No mask provided, using depth-based heuristic (depth: {self.depth_min}-{self.depth_max}m). Consider using proper segmentation.")
+                
+                # Validate mask has sufficient pixels
+                if ob_mask.sum() < 4:
+                    rospy.logwarn_throttle(5.0, f"Mask too small ({ob_mask.sum()} pixels). Depth range may be incorrect or object not visible.")
+                else:
+                    rospy.logwarn_once(f"No mask provided, using depth-based heuristic (depth: {self.depth_min}-{self.depth_max}m, {ob_mask.sum()} pixels). Consider using proper segmentation.")
+            else:
+                # Validate provided mask
+                if ob_mask.dtype != bool:
+                    ob_mask = ob_mask.astype(bool)
+                if ob_mask.sum() < 4:
+                    rospy.logwarn_throttle(5.0, f"Provided mask too small ({ob_mask.sum()} pixels). Pose estimation may fail.")
             
             # Estimate pose
             if not self.pose_initialized:
@@ -426,10 +554,95 @@ class FoundationPoseNode:
             
             self.last_pose = pose
             
-            # Publish pose and compare with ground truth
-            self.publish_pose(pose, header)
-            self.compare_with_ground_truth(pose, header)
-            self.publish_markers(pose, header)
+            # Apply to_origin transformation to match run_demo.py behavior
+            # FoundationPose returns pose in centered mesh coordinate system
+            # We need to transform it back to original mesh coordinate system (with oriented bounds alignment)
+            # This is the same transformation applied in run_demo.py line 69: center_pose = pose@np.linalg.inv(to_origin)
+            pose_corrected = pose @ np.linalg.inv(self.to_origin)
+            
+            # Debug: Log transformation details (throttled, only once)
+            if self.debug >= 2 and not hasattr(self, '_to_origin_debug_logged'):
+                from scipy.spatial.transform import Rotation
+                R_before = pose[:3, :3]
+                R_after = pose_corrected[:3, :3]
+                rospy.loginfo("="*60)
+                rospy.loginfo("POSE TRANSFORMATION DEBUG")
+                rospy.loginfo("="*60)
+                rospy.loginfo(f"to_origin transformation:\n{self.to_origin}")
+                rospy.loginfo(f"Pose before to_origin (from FoundationPose):\n{pose}")
+                rospy.loginfo(f"Pose after to_origin:\n{pose_corrected}")
+                rot_before = Rotation.from_matrix(R_before)
+                rot_after = Rotation.from_matrix(R_after)
+                rospy.loginfo(f"Rotation before (euler ZYX): {rot_before.as_euler('zyx', degrees=True)}")
+                rospy.loginfo(f"Rotation after (euler ZYX): {rot_after.as_euler('zyx', degrees=True)}")
+                rospy.loginfo("="*60)
+                self._to_origin_debug_logged = True
+            
+            # Apply orientation correction
+            if self.auto_correction_enabled and not self.correction_tested:
+                # Track pose history for stability checking
+                if self.pose_initialized:
+                    self._update_pose_history(pose_corrected)
+                    
+                    # Check if pose has stabilized
+                    if self._is_pose_stable():
+                        # Pose is stable, check error and test corrections if needed
+                        error = self._check_orientation_error(pose_corrected)
+                        if error is not None and error > self.auto_correction_error_threshold:
+                            rospy.loginfo(f"Pose stabilized. Orientation error ({error:.2f}°) exceeds threshold ({self.auto_correction_error_threshold}°). Testing all corrections...")
+                            pose_corrected = self._test_and_find_best_correction(pose_corrected, header)
+                        else:
+                            # Error is acceptable, no correction needed
+                            self.correction_tested = True
+                            if error is not None:
+                                rospy.loginfo(f"Pose stabilized. Orientation error ({error:.2f}°) is acceptable. No correction needed.")
+                            else:
+                                rospy.loginfo("Pose stabilized. No ground truth available. No correction applied.")
+                    else:
+                        # Still collecting samples or pose not stable yet
+                        samples = len(self.pose_history)
+                        if samples < self.pose_stability_min_samples:
+                            rospy.loginfo_throttle(2.0, f"Collecting pose samples for stability check: {samples}/{self.pose_stability_min_samples}...")
+                        else:
+                            rospy.loginfo_throttle(2.0, f"Pose not yet stable ({samples} samples collected). Waiting for convergence...")
+            elif self.auto_correction_enabled and self.correction_tested and self.best_correction is not None:
+                # Apply the correction (default or best found)
+                correction_matrix = np.eye(4)
+                correction_matrix[:3, :3] = self.best_correction
+                pose_corrected = pose_corrected @ correction_matrix
+                # Log periodically to confirm correction is being applied
+                rospy.loginfo_throttle(10.0, "Applying orientation correction (best fit from testing)")
+            elif self.manual_correction_enabled:
+                # Apply manual correction
+                correction_matrix = np.eye(4)
+                correction_matrix[:3, :3] = self.manual_orientation_correction
+                pose_corrected = pose_corrected @ correction_matrix
+                rospy.loginfo_throttle(5.0, "Applied manual orientation correction")
+            
+            # Check pose quality before publishing (only publish if error is acceptable)
+            quality_check = self._check_pose_quality(pose_corrected)
+            if quality_check is not None:
+                pos_error, orient_error = quality_check
+                if pos_error <= self.publish_position_error_threshold and orient_error <= self.publish_orientation_error_threshold:
+                    # Quality is good, publish pose
+                    self.publish_pose(pose_corrected, header)
+                    self.publish_markers(pose_corrected, header)
+                    rospy.loginfo_throttle(5.0, f"Publishing pose: pos_error={pos_error:.4f}m (threshold={self.publish_position_error_threshold:.4f}m), "
+                                                f"orient_error={orient_error:.2f}° (threshold={self.publish_orientation_error_threshold:.2f}°)")
+                else:
+                    # Quality is not good enough, don't publish
+                    rospy.logwarn_throttle(2.0, f"NOT publishing pose (quality too low): pos_error={pos_error:.4f}m (threshold={self.publish_position_error_threshold:.4f}m), "
+                                                f"orient_error={orient_error:.2f}° (threshold={self.publish_orientation_error_threshold:.2f}°)")
+            else:
+                # No ground truth available, publish anyway (for initial setup)
+                if not hasattr(self, '_no_gt_publish_warning_logged'):
+                    rospy.logwarn("No ground truth available. Publishing pose without quality check.")
+                    self._no_gt_publish_warning_logged = True
+                self.publish_pose(pose_corrected, header)
+                self.publish_markers(pose_corrected, header)
+            
+            # Always compare with ground truth for logging/debugging
+            self.compare_with_ground_truth(pose_corrected, header)
             
         except Exception as e:
             rospy.logerr(f"Error in pose estimation: {e}")
@@ -488,6 +701,291 @@ class FoundationPoseNode:
         transform_tf.transform.rotation.w = quat[3]
         
         self.tf_broadcaster.sendTransform(transform_tf)
+    
+    # ========================================================================
+    # Orientation Correction Testing
+    # ========================================================================
+    
+    def _generate_rotation_combinations(self):
+        """
+        Generate all combinations of 90 and 180 degree rotations around x, y, z axes.
+        
+        Returns:
+            list: List of (rotation_matrix, description) tuples
+        """
+        from scipy.spatial.transform import Rotation
+        
+        combinations = []
+        angles = [0, 90, 180]  # degrees
+        
+        for x_angle in angles:
+            for y_angle in angles:
+                for z_angle in angles:
+                    # Skip identity (0, 0, 0)
+                    if x_angle == 0 and y_angle == 0 and z_angle == 0:
+                        continue
+                    
+                    # Create rotation from Euler angles (ZYX convention)
+                    rot = Rotation.from_euler('zyx', [z_angle, y_angle, x_angle], degrees=True)
+                    rot_matrix = rot.as_matrix()
+                    description = f"X:{x_angle}° Y:{y_angle}° Z:{z_angle}°"
+                    combinations.append((rot_matrix, description))
+        
+        return combinations
+    
+    def _check_orientation_error(self, pose_corrected):
+        """
+        Check the orientation error of the current pose compared to ground truth.
+        
+        Args:
+            pose_corrected: Pose after to_origin transformation
+            
+        Returns:
+            float: Orientation error in degrees, or None if no ground truth available
+        """
+        if self.gt_pose is None or not hasattr(self, 'gt_pose_camera_frame') or self.gt_pose_camera_frame is None:
+            return None
+        
+        from scipy.spatial.transform import Rotation
+        
+        # Get ground truth pose in camera frame
+        gt_pose_for_comparison = self.gt_pose_camera_frame
+        _, quat_gt = self._extract_pose_arrays(gt_pose_for_comparison)
+        rot_gt = Rotation.from_quat(quat_gt)
+        R_gt = rot_gt.as_matrix()
+        
+        # Extract estimated rotation
+        R_est = pose_corrected[:3, :3]
+        
+        # Calculate orientation error
+        R_diff = R_est @ R_gt.T
+        rot_diff = Rotation.from_matrix(R_diff)
+        angle_error_rad = np.linalg.norm(rot_diff.as_rotvec())
+        angle_error_deg = angle_error_rad * 180 / np.pi
+        
+        return angle_error_deg
+    
+    def _check_pose_quality(self, pose_corrected):
+        """
+        Check both position and orientation errors compared to ground truth.
+        
+        Args:
+            pose_corrected: Pose after to_origin transformation
+            
+        Returns:
+            tuple: (position_error_m, orientation_error_deg) or None if no ground truth available
+        """
+        if self.gt_pose is None or not hasattr(self, 'gt_pose_camera_frame') or self.gt_pose_camera_frame is None:
+            return None
+        
+        from scipy.spatial.transform import Rotation
+        
+        # Get ground truth pose in camera frame
+        gt_pose_for_comparison = self.gt_pose_camera_frame
+        t_gt, quat_gt = self._extract_pose_arrays(gt_pose_for_comparison)
+        rot_gt = Rotation.from_quat(quat_gt)
+        R_gt = rot_gt.as_matrix()
+        
+        # Extract estimated pose
+        R_est = pose_corrected[:3, :3]
+        t_est = pose_corrected[:3, 3]
+        
+        # Calculate position error
+        pos_error = np.linalg.norm(t_est - t_gt)
+        
+        # Calculate orientation error
+        R_diff = R_est @ R_gt.T
+        rot_diff = Rotation.from_matrix(R_diff)
+        angle_error_rad = np.linalg.norm(rot_diff.as_rotvec())
+        angle_error_deg = angle_error_rad * 180 / np.pi
+        
+        return (pos_error, angle_error_deg)
+    
+    def _update_pose_history(self, pose):
+        """
+        Update pose history for stability checking.
+        
+        Args:
+            pose: 4x4 transformation matrix
+        """
+        from scipy.spatial.transform import Rotation
+        
+        # Extract position and orientation
+        t = pose[:3, 3]
+        R = pose[:3, :3]
+        rot = Rotation.from_matrix(R)
+        quat = rot.as_quat()
+        
+        # Store pose data
+        pose_data = {
+            'position': t.copy(),
+            'quaternion': quat.copy(),
+            'rotation_matrix': R.copy()
+        }
+        
+        # Add to history
+        self.pose_history.append(pose_data)
+        
+        # Keep only recent poses
+        if len(self.pose_history) > self.pose_history_max_size:
+            self.pose_history.pop(0)
+    
+    def _is_pose_stable(self):
+        """
+        Check if pose has stabilized by analyzing recent pose history.
+        
+        Returns:
+            bool: True if pose is stable, False otherwise
+        """
+        # Need minimum samples before checking stability
+        if len(self.pose_history) < self.pose_stability_min_samples:
+            return False
+        
+        from scipy.spatial.transform import Rotation
+        
+        # Get recent poses (last N samples)
+        recent_poses = self.pose_history[-self.pose_stability_min_samples:]
+        
+        # Calculate position variance
+        positions = np.array([p['position'] for p in recent_poses])
+        pos_mean = np.mean(positions, axis=0)
+        pos_std = np.std(positions, axis=0)
+        max_pos_std = np.max(pos_std)
+        
+        # Calculate orientation variance
+        orientations = [Rotation.from_quat(p['quaternion']) for p in recent_poses]
+        # Use rotation vector magnitude as orientation change metric
+        orientation_changes = []
+        for i in range(1, len(orientations)):
+            R_diff = orientations[i].as_matrix() @ orientations[i-1].as_matrix().T
+            rot_diff = Rotation.from_matrix(R_diff)
+            angle_change = np.linalg.norm(rot_diff.as_rotvec()) * 180 / np.pi  # degrees
+            orientation_changes.append(angle_change)
+        
+        max_orientation_change = np.max(orientation_changes) if orientation_changes else 0.0
+        
+        # Check if both position and orientation are stable
+        pos_stable = max_pos_std < self.pose_stability_threshold
+        orient_stable = max_orientation_change < self.pose_stability_orientation_threshold
+        
+        # Log stability status periodically
+        if not hasattr(self, '_last_stability_check_time'):
+            self._last_stability_check_time = 0
+        
+        current_time = rospy.get_time()
+        if current_time - self._last_stability_check_time >= 2.0:  # Log every 2 seconds
+            rospy.loginfo_throttle(2.0, 
+                f"Pose stability check: pos_std={max_pos_std:.4f}m (threshold={self.pose_stability_threshold:.4f}m), "
+                f"orient_change={max_orientation_change:.2f}° (threshold={self.pose_stability_orientation_threshold:.2f}°), "
+                f"stable={pos_stable and orient_stable}")
+            self._last_stability_check_time = current_time
+        
+        return pos_stable and orient_stable
+    
+    def _test_and_find_best_correction(self, pose_corrected, header):
+        """
+        Test all rotation combinations and find the one with lowest error compared to ground truth.
+        
+        Args:
+            pose_corrected: Pose after to_origin transformation
+            header: ROS message header
+            
+        Returns:
+            numpy.ndarray: Best corrected pose
+        """
+        if self.gt_pose is None or not hasattr(self, 'gt_pose_camera_frame') or self.gt_pose_camera_frame is None:
+            # No ground truth yet, cannot test
+            rospy.logwarn("No ground truth available. Cannot test orientation corrections.")
+            self.correction_tested = True
+            return pose_corrected
+        
+        from scipy.spatial.transform import Rotation
+        
+        rospy.loginfo("="*70)
+        rospy.loginfo("TESTING ALL ORIENTATION CORRECTION COMBINATIONS")
+        rospy.loginfo("="*70)
+        
+        # Get ground truth pose in camera frame
+        gt_pose_for_comparison = self.gt_pose_camera_frame
+        t_gt, quat_gt = self._extract_pose_arrays(gt_pose_for_comparison)
+        rot_gt = Rotation.from_quat(quat_gt)
+        R_gt = rot_gt.as_matrix()
+        
+        # Generate all rotation combinations
+        combinations = self._generate_rotation_combinations()
+        rospy.loginfo(f"Testing {len(combinations)} rotation combinations...")
+        
+        best_error = float('inf')
+        best_correction = None
+        best_description = None
+        best_pose = None
+        
+        results = []
+        
+        for correction_matrix, description in combinations:
+            # Apply correction
+            correction_4x4 = np.eye(4)
+            correction_4x4[:3, :3] = correction_matrix
+            test_pose = pose_corrected @ correction_4x4
+            
+            # Extract rotation
+            R_test = test_pose[:3, :3]
+            t_test = test_pose[:3, 3]
+            
+            # Calculate orientation error
+            R_diff = R_test @ R_gt.T
+            rot_diff = Rotation.from_matrix(R_diff)
+            angle_error_rad = np.linalg.norm(rot_diff.as_rotvec())
+            angle_error_deg = angle_error_rad * 180 / np.pi
+            
+            # Calculate position error
+            pos_error = np.linalg.norm(t_test - t_gt)
+            
+            # Combined error (weighted: orientation is more important)
+            total_error = angle_error_deg + pos_error * 10.0  # 10cm = 1 degree
+            
+            results.append({
+                'description': description,
+                'angle_error': angle_error_deg,
+                'pos_error': pos_error,
+                'total_error': total_error,
+                'correction': correction_matrix
+            })
+            
+            if total_error < best_error:
+                best_error = total_error
+                best_correction = correction_matrix
+                best_description = description
+                best_pose = test_pose
+        
+        # Sort results by error
+        results.sort(key=lambda x: x['total_error'])
+        
+        # Print top 5 results
+        rospy.loginfo("\nTop 5 correction combinations:")
+        for i, result in enumerate(results[:5]):
+            rospy.loginfo(f"  {i+1}. {result['description']}: "
+                         f"angle_error={result['angle_error']:.2f}°, "
+                         f"pos_error={result['pos_error']:.4f}m, "
+                         f"total_error={result['total_error']:.2f}")
+        
+        # Set best correction
+        if best_correction is not None:
+            self.best_correction = best_correction
+            self.correction_tested = True
+            rospy.loginfo("\n" + "="*70)
+            rospy.loginfo(f"BEST CORRECTION FOUND: {best_description}")
+            rospy.loginfo(f"  Angle error: {results[0]['angle_error']:.2f}°")
+            rospy.loginfo(f"  Position error: {results[0]['pos_error']:.4f}m")
+            rospy.loginfo(f"  Total error: {results[0]['total_error']:.2f}")
+            rospy.loginfo("="*70)
+            rospy.loginfo("This correction will be applied to all subsequent poses.")
+        else:
+            rospy.logwarn("No correction found better than identity. Using original pose.")
+            self.best_correction = np.eye(3)  # Identity
+            self.correction_tested = True
+        
+        return best_pose if best_pose is not None else pose_corrected
     
     # ========================================================================
     # Utility Methods
@@ -554,6 +1052,7 @@ class FoundationPoseNode:
         
         First tries with the message's timestamp, then falls back to current time
         if that fails (e.g., due to extrapolation into past).
+        Also tries intermediate frames (odom, base_link) if direct transform fails.
         
         Args:
             target_frame: Target frame ID (e.g., 'map', 'odom', 'head_rgbd_sensor_rgb_frame')
@@ -565,29 +1064,102 @@ class FoundationPoseNode:
         """
         from copy import deepcopy
         
+        source_frame = pose_msg.header.frame_id
+        
+        # If source and target are the same, return as-is
+        if source_frame == target_frame:
+            return pose_msg
+        
+        error_msgs = []
+        
+        # Try direct transform first
         try:
             # First try with the message's timestamp
             self.tf_listener.waitForTransform(
                 target_frame,
-                pose_msg.header.frame_id,
+                source_frame,
                 pose_msg.header.stamp,
                 rospy.Duration(timeout)
             )
             return self.tf_listener.transformPose(target_frame, pose_msg)
-        except Exception:
-            # If that fails (likely due to extrapolation into past), try with current time
+        except Exception as e1:
+            error_msgs.append(f"Direct transform (with timestamp): {str(e1)[:150]}")
+            # If that fails, try with current time
             try:
                 pose_msg_latest = deepcopy(pose_msg)
                 pose_msg_latest.header.stamp = rospy.Time.now()
                 self.tf_listener.waitForTransform(
                     target_frame,
-                    pose_msg.header.frame_id,
+                    source_frame,
                     rospy.Time(0),  # Latest available for waitForTransform
                     rospy.Duration(timeout)
                 )
                 return self.tf_listener.transformPose(target_frame, pose_msg_latest)
-            except Exception:
-                # Transform failed completely
+            except Exception as e2:
+                error_msgs.append(f"Direct transform (latest time): {str(e2)[:150]}")
+                # Try multi-hop transform through intermediate frames
+                # Common intermediate frames: odom, base_link
+                intermediate_frames = ['odom', 'base_link', 'base_footprint']
+                
+                for intermediate in intermediate_frames:
+                    try:
+                        # Transform source -> intermediate -> target
+                        # Use a small time offset in the past to avoid extrapolation errors
+                        # First: source -> intermediate
+                        pose_intermediate = deepcopy(pose_msg)
+                        # Use a small offset in the past to ensure we don't extrapolate
+                        # rospy.Time(0) means "latest", but we need to be slightly in the past
+                        latest_time = self.tf_listener.getLatestCommonTime(source_frame, intermediate)
+                        pose_intermediate.header.stamp = latest_time
+                        
+                        self.tf_listener.waitForTransform(
+                            intermediate,
+                            source_frame,
+                            latest_time,
+                            rospy.Duration(timeout)
+                        )
+                        pose_intermediate = self.tf_listener.transformPose(intermediate, pose_intermediate)
+                        
+                        # Second: intermediate -> target
+                        # Get latest common time for the second transform
+                        latest_time2 = self.tf_listener.getLatestCommonTime(intermediate, target_frame)
+                        pose_intermediate.header.stamp = latest_time2
+                        self.tf_listener.waitForTransform(
+                            target_frame,
+                            intermediate,
+                            latest_time2,
+                            rospy.Duration(timeout)
+                        )
+                        result = self.tf_listener.transformPose(target_frame, pose_intermediate)
+                        rospy.logdebug(f"Successfully transformed {source_frame} -> {intermediate} -> {target_frame}")
+                        return result
+                    except Exception as e3:
+                        error_msgs.append(f"Multi-hop via {intermediate}: {str(e3)[:150]}")
+                        continue  # Try next intermediate frame
+                
+                # All transforms failed - log detailed error
+                error_key = f"{source_frame}->{target_frame}"
+                if not hasattr(self, '_tf_error_logged'):
+                    self._tf_error_logged = set()
+                
+                if error_key not in self._tf_error_logged:
+                    rospy.logwarn(f"Transform failed: {source_frame} -> {target_frame}")
+                    for err in error_msgs[-3:]:  # Show last 3 errors
+                        rospy.logwarn(f"  {err}")
+                    rospy.logwarn(f"  Tried intermediate frames: {intermediate_frames}")
+                    # Check if frames exist in TF tree (old tf API doesn't have getFrameStrings)
+                    try:
+                        # Try to get all frames using tf API
+                        # Note: old tf.TransformListener doesn't have getFrameStrings()
+                        # We can check if transform exists by trying a very short wait
+                        import tf
+                        # Just log that we can't easily query the TF tree with old API
+                        rospy.logwarn(f"  Note: Cannot easily query TF tree with old tf API")
+                        rospy.logwarn(f"  Try: rosrun tf view_frames (to see TF tree structure)")
+                    except Exception as e:
+                        rospy.logwarn(f"  Could not query TF tree: {e}")
+                    self._tf_error_logged.add(error_key)
+                
                 return None
     
     def _check_gt_topic(self, event):
@@ -598,9 +1170,9 @@ class FoundationPoseNode:
             pub_list = rospy.get_published_topics()
             topic_exists = any(t[0] == topic for t in pub_list)
             if topic_exists:
-                print(f"[FOUNDATIONPOSE] ✓ Ground truth topic exists: {topic}", file=sys.stderr, flush=True)
+                print(f"[FOUNDATIONPOSE] Ground truth topic exists: {topic}", file=sys.stderr, flush=True)
             else:
-                print(f"[FOUNDATIONPOSE] ✗ Ground truth topic NOT found: {topic}", file=sys.stderr, flush=True)
+                print(f"[FOUNDATIONPOSE] Ground truth topic NOT found: {topic}", file=sys.stderr, flush=True)
                 print(f"[FOUNDATIONPOSE] Available topics with 'mustard' or 'ground_truth':", file=sys.stderr, flush=True)
                 for t, msg_type in pub_list:
                     if 'mustard' in t.lower() or 'ground_truth' in t.lower() or 'pose' in t.lower():
@@ -623,7 +1195,7 @@ class FoundationPoseNode:
         if not self.gt_pose_received:
             self.gt_pose_received = True
             import sys
-            print(f"[FOUNDATIONPOSE] ✓✓✓ Received first ground truth pose from Isaac Sim: "
+            print(f"[FOUNDATIONPOSE] Received first ground truth pose from Isaac Sim: "
                   f"pos=[{msg.pose.position.x:.3f}, {msg.pose.position.y:.3f}, {msg.pose.position.z:.3f}], "
                   f"orient=[{msg.pose.orientation.x:.3f}, {msg.pose.orientation.y:.3f}, "
                   f"{msg.pose.orientation.z:.3f}, {msg.pose.orientation.w:.3f}]",

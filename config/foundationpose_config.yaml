@@ -1,20 +1,30 @@
 # FoundationPose Configuration
-# This file contains default mesh paths and parameters for FoundationPose pose estimation
+# This file contains all parameters for FoundationPose pose estimation
 
-# Mesh file paths (update these to point to your object meshes)
-meshes:
-  mustard: "$(find final-project-OfficialBishal)/meshes/mustard.obj"
-  # Add more objects here as needed
-  # object_name: "$(find final-project-OfficialBishal)/meshes/object_name.obj"
+# ============================================================================
+# Mesh Configuration
+# ============================================================================
+# Path relative to workspace root: src/final-project-OfficialBishal/meshes/mustard.obj
+# Or use absolute path: /home/local/csc752/csc752/hsr_robocanes_omniverse/src/final-project-OfficialBishal/meshes/mustard.obj
+mesh_file: "src/final-project-OfficialBishal/meshes/mustard.obj"
 
-# Camera topics (default for HSR robot in Isaac Sim)
+# ============================================================================
+# Camera Topics (default for HSR robot in Isaac Sim)
+# ============================================================================
 camera:
   rgb_topic: "/hsrb/head_rgbd_sensor/rgb/image_rect_color"
   depth_topic: "/hsrb/head_rgbd_sensor/depth_registered/image_rect_raw"
   camera_info_topic: "/hsrb/head_rgbd_sensor/rgb/camera_info"
   frame_id: "head_rgbd_sensor_rgb_frame"
 
-# FoundationPose parameters
+# ============================================================================
+# Frame IDs
+# ============================================================================
+object_frame_id: "object_pose"
+
+# ============================================================================
+# FoundationPose Core Parameters
+# ============================================================================
 foundationpose:
   # Number of refinement iterations for initial pose estimation
   est_refine_iter: 5
@@ -24,11 +34,114 @@ foundationpose:
   
   # Debug level (0=off, 1=basic, 2=detailed, 3=verbose)
   debug: 1
-  
+
+# ============================================================================
+# Mask Parameters
+# ============================================================================
+mask:
   # Use object mask for segmentation (requires mask_topic)
-  use_mask: false
-  mask_topic: ""
+  use_mask: true
+  mask_topic: "/segmentation/mustard_mask"
 
-# Object frame ID for TF publishing
-object_frame_id: "object_pose"
+# ============================================================================
+# Depth Mask Parameters (for better object isolation)
+# ============================================================================
+depth_mask:
+  # Minimum depth (meters) - objects closer than this are ignored
+  depth_min: 0.3
+  # Maximum depth (meters) - objects farther than this are ignored
+  depth_max: 2.0
 
+# ============================================================================
+# Orientation Correction Parameters
+# ============================================================================
+orientation_correction:
+  # Enable automatic orientation correction testing
+  # If enabled, will test all combinations of 90 and 180 degree rotations
+  # and select the one with the lowest error compared to ground truth
+  auto_orientation_correction: true
+  
+  # Error threshold (degrees) - only test corrections if error exceeds this
+  auto_correction_error_threshold: 80.0
+  
+  # Manual correction: specify axis ('x', 'y', 'z') for 90-degree rotation
+  # Leave empty to disable manual correction
+  orientation_correction_90deg: ""
+
+# ============================================================================
+# Pose Stability Parameters (for automatic correction timing)
+# ============================================================================
+pose_stability:
+  # Number of recent poses to track for stability checking
+  pose_stability_history_size: 30
+  
+  # Position change threshold (meters) - pose is stable if std dev < this
+  pose_stability_threshold: 0.02
+  
+  # Orientation change threshold (degrees) - pose is stable if max change < this
+  pose_stability_orientation_threshold: 2.0
+  
+  # Minimum number of samples before checking stability
+  pose_stability_min_samples: 20
+
+# ============================================================================
+# Pose Publishing Quality Thresholds
+# ============================================================================
+publish_quality:
+  # Only publish pose if position error is below this threshold (meters)
+  publish_position_error_threshold: 0.2
+  
+  # Only publish pose if orientation error is below this threshold (degrees)
+  publish_orientation_error_threshold: 45.0
+
+# ============================================================================
+# SAM Segmentation Parameters
+# ============================================================================
+sam:
+  # SAM model type: vit_b (fastest), vit_l (balanced), or vit_h (most accurate)
+  sam_model_type: "vit_h"
+  
+  # Path to SAM checkpoint file
+  # Path relative to workspace root: src/final-project-OfficialBishal/sam-checkpoints/sam_vit_h.pth
+  # Or use absolute path: /home/local/csc752/csc752/hsr_robocanes_omniverse/src/final-project-OfficialBishal/sam-checkpoints/sam_vit_h.pth
+  sam_checkpoint_path: "src/final-project-OfficialBishal/sam-checkpoints/sam_vit_h.pth"
+  
+  # Segmentation strategy: 'center_point', 'point', 'box', 'automatic', or 'detection'
+  segmentation_strategy: "detection"
+  
+  # Device to run SAM on: 'cuda' or 'cpu'
+  device: "cuda"
+  
+  # Point prompt parameters (for point/center_point strategy)
+  prompt_point_x: -1  # -1 means center of image
+  prompt_point_y: -1  # -1 means center of image
+  
+  # Box prompt parameters (for box strategy) - fractions of image dimensions
+  box_x_min: 0.3
+  box_y_min: 0.3
+  box_x_max: 0.7
+  box_y_max: 0.7
+  
+  # Automatic mask generation parameters
+  min_mask_area: 100  # Minimum pixels
+  max_mask_area: 1000000  # Maximum pixels
+
+# ============================================================================
+# Object Detection Parameters (YOLO - for detection strategy)
+# ============================================================================
+object_detection:
+  # YOLO model path or name (e.g., yolov8n.pt, yolov8s.pt, yolov8m.pt, yolov8l.pt, yolov8x.pt)
+  # Can be a path to a file or just the model name (will download automatically)
+  yolo_model_path: "yolov8n.pt"
+  
+  # Class name to detect (e.g., 'bottle', 'mustard', 'cup')
+  target_class_name: "bottle"
+  
+  # Class ID to detect (-1 means use class name instead)
+  target_class_id: -1
+  
+  # YOLO confidence threshold (0.0 to 1.0)
+  detection_confidence: 0.25
+  
+  # YOLO IoU threshold for non-maximum suppression (0.0 to 1.0)
+  detection_iou: 0.45

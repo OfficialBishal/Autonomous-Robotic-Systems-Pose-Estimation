@@ -88,7 +88,7 @@ def analyze_obj_file(obj_file):
     center_mag = (center_x**2 + center_y**2 + center_z**2)**0.5
     print(f"\n--- Centering Check ---")
     if center_mag < 0.01:
-        print(f"✓ Mesh is centered (center magnitude: {center_mag:.6f})")
+        print(f"Mesh is centered (center magnitude: {center_mag:.6f})")
     else:
         print(f"✗ Mesh is NOT centered (center magnitude: {center_mag:.6f})")
         print(f"  Note: FoundationPose will automatically center it")
@@ -102,11 +102,11 @@ def analyze_obj_file(obj_file):
     print(f"  - FoundationPose: Uses mesh as-is")
     
     if height_axis == 1:  # Y is height
-        print(f"\n→ Mesh appears to use Y-up convention (common in Blender/OBJ)")
+        print(f"\nMesh appears to use Y-up convention (common in Blender/OBJ)")
     elif height_axis == 2:  # Z is height
-        print(f"\n→ Mesh appears to use Z-up convention (common in ROS)")
+        print(f"\nMesh appears to use Z-up convention (common in ROS)")
     else:  # X is height (unusual)
-        print(f"\n→ Mesh appears to use X-up convention (unusual)")
+        print(f"\nMesh appears to use X-up convention (unusual)")
     
     # Sample some vertices to understand orientation
     print(f"\n--- Sample Vertices (first 5) ---")
