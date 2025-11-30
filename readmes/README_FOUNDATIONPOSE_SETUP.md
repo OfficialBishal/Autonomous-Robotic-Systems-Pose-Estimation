@@ -82,7 +82,7 @@ If not set up, see FoundationPose documentation.
 
 ```bash
 cd ~/hsr_robocanes_omniverse/src/final-project-OfficialBishal
-./scripts/setup_sam.sh
+./setup/setup_sam.sh
 ```
 
 **Option B: Manual Setup**

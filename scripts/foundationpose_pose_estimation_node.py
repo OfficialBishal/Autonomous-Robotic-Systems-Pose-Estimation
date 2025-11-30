@@ -82,9 +82,10 @@ try:
     from estimater import FoundationPose
     from learning.training.predict_score import ScorePredictor
     from learning.training.predict_pose_refine import PoseRefinePredictor
-    from Utils import set_seed, set_logging_format
+    from Utils import set_seed, set_logging_format, draw_posed_3d_box, draw_xyz_axis
     import trimesh
     import nvdiffrast.torch as dr
+    import imageio
 except ImportError as e:
     print(f"ERROR: Failed to import FoundationPose modules: {e}")
     print("Make sure you're running in the foundationpose conda environment")
@@ -104,7 +105,8 @@ class FoundationPoseNode:
     
     # Constants for visualization
     AXIS_LENGTH = 0.15  # 15cm axis length for coordinate frame markers
-    AXIS_COLORS = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]  # R, G, B for x, y, z axes
+    # Standard RGB convention: X=Red, Y=Green, Z=Blue
+    AXIS_COLORS = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]  # Red, Green, Blue for x, y, z axes
     AXIS_NAMES = ['x', 'y', 'z']
     AXIS_SHAFT_DIAMETER = 0.01  # Shaft diameter for arrow markers
     AXIS_HEAD_DIAMETER = 0.02   # Head diameter for arrow markers
@@ -132,14 +134,6 @@ class FoundationPoseNode:
         self.last_pose = None
         self.gt_pose = None
         self.gt_pose_received = False
-        
-        # Orientation correction state
-        self.best_correction = None  # Will store the best rotation combination
-        self.correction_tested = False  # Whether we've tested all combinations
-        self.correction_test_results = []  # Store test results
-        
-        # Pose stability tracking (replaces fixed delay) - loaded from config in _load_parameters
-        self.pose_history = []  # Store recent pose estimates for stability checking
         # These will be loaded in _load_parameters() after config file is loaded
         
         
@@ -157,7 +151,7 @@ class FoundationPoseNode:
         rospy.loginfo(f"Subscribing to RGB: {self.rgb_topic}")
         rospy.loginfo(f"Subscribing to Depth: {self.depth_topic}")
         rospy.loginfo(f"Subscribing to CameraInfo: {self.camera_info_topic}")
-        rospy.loginfo(f"Subscribing to Ground Truth: /mustard_bottle/ground_truth_pose")
+        # Object name will be set in _load_parameters, log it after
     
     # ========================================================================
     # Initialization Methods
@@ -165,11 +159,32 @@ class FoundationPoseNode:
     
     def _load_parameters(self):
         """Load ROS parameters from config file (organized structure)."""
+        # Object name parameter (used for topics and default paths)
+        self.object_name = rospy.get_param('~object_name', 'mustard_bottle')
+        rospy.loginfo(f"Object name: {self.object_name}")
+        
         # Mesh file parameter (top level)
+        # Default mesh paths based on object name
+        workspace_root = os.path.expanduser('~/hsr_robocanes_omniverse')
+        meshes_dir = os.path.join(workspace_root, 'src', 'final-project-OfficialBishal', 'meshes')
         default_mesh_paths = [
+            # Try in object-specific folder (organized structure) - YCB naming convention
+            os.path.join(meshes_dir, self.object_name, 'textured.obj'),  # YCB standard name
+            os.path.join(meshes_dir, self.object_name, 'textured_simple.obj'),  # FoundationPose demo naming
+            os.path.join(meshes_dir, self.object_name, 'mesh.obj'),  # Generic name
+            os.path.join(meshes_dir, self.object_name, f'{self.object_name}.obj'),  # Object name as filename
+            # Try exact object name (flat structure) - for backward compatibility
+            os.path.join(meshes_dir, f'{self.object_name}.obj'),
+            # Try without underscores (flat structure)
+            os.path.join(meshes_dir, f'{self.object_name.replace("_", "")}.obj'),
+            # Special case: if object_name is "cracker_box", also try "craker_box" (typo in filename)
+            os.path.join(meshes_dir, 'craker_box.obj') if 'cracker' in self.object_name.lower() else None,
+            # Fallback to FoundationPose demo data
             os.path.join(FOUNDATIONPOSE_PATH, 'demo_data', 'mustard0', 'mesh', 'textured_simple.obj'),
             os.path.join(os.path.expanduser('~'), 'hsr_robocanes_omniverse', 'src', 'FoundationPose', 'demo_data', 'mustard0', 'mesh', 'textured_simple.obj'),
         ]
+        # Remove None entries
+        default_mesh_paths = [p for p in default_mesh_paths if p is not None]
         
         self.mesh_file = rospy.get_param('~mesh_file', '')
         
@@ -232,48 +247,31 @@ class FoundationPoseNode:
         # Mask parameters (from config file nested structure)
         self.use_mask = rospy.get_param('~mask/use_mask', rospy.get_param('~use_mask', False))
         self.mask_topic = rospy.get_param('~mask/mask_topic', rospy.get_param('~mask_topic', ''))
+        # If mask_topic is empty, use default based on object_name
+        if not self.mask_topic:
+            self.mask_topic = f'/segmentation/{self.object_name}_mask'
+            rospy.loginfo(f"No mask_topic specified, using default: {self.mask_topic}")
         
         # Depth mask parameters (from config file nested structure)
         self.depth_min = rospy.get_param('~depth_mask/depth_min', rospy.get_param('~depth_min', 0.3))
         self.depth_max = rospy.get_param('~depth_mask/depth_max', rospy.get_param('~depth_max', 2.0))
         
-        # Orientation correction parameters (from config file nested structure)
-        self.auto_correction_enabled = rospy.get_param('~orientation_correction/auto_orientation_correction', 
-                                                       rospy.get_param('~auto_orientation_correction', True))
-        self.auto_correction_error_threshold = rospy.get_param('~orientation_correction/auto_correction_error_threshold',
-                                                               rospy.get_param('~auto_correction_error_threshold', 80.0))
-        
-        # Manual orientation correction (for backward compatibility)
-        correction_axis = rospy.get_param('~orientation_correction/orientation_correction_90deg',
-                                         rospy.get_param('~orientation_correction_90deg', '')).lower().strip()
-        if correction_axis in ['x', 'y', 'z']:
+        # Coordinate frame correction (to fix upside-down objects in RViz)
+        self.coord_correction_enabled = rospy.get_param('~coordinate_frame_correction/enabled', False)
+        if self.coord_correction_enabled:
+            euler_zyx_deg = rospy.get_param('~coordinate_frame_correction/rotation_euler_zyx_degrees', [0, 0, 180])
             from scipy.spatial.transform import Rotation
-            angle_rad = np.pi / 2.0
-            if correction_axis == 'x':
-                self.manual_orientation_correction = Rotation.from_euler('x', angle_rad, degrees=False).as_matrix()
-            elif correction_axis == 'y':
-                self.manual_orientation_correction = Rotation.from_euler('y', angle_rad, degrees=False).as_matrix()
-            elif correction_axis == 'z':
-                self.manual_orientation_correction = Rotation.from_euler('z', angle_rad, degrees=False).as_matrix()
-            self.manual_correction_enabled = True
-            self.auto_correction_enabled = False  # Disable auto if manual is set
-            rospy.loginfo(f"Manual orientation correction enabled: 90-degree rotation around {correction_axis.upper()}-axis")
+            # Convert degrees to radians and create rotation matrix
+            euler_zyx_rad = np.deg2rad(euler_zyx_deg)
+            self.coord_correction_rotation = Rotation.from_euler('zyx', euler_zyx_rad, degrees=False)
+            self.coord_correction_matrix = self.coord_correction_rotation.as_matrix()
+            # Store original Euler angles for debug output (don't convert back from matrix)
+            self.coord_correction_euler_deg = euler_zyx_deg
+            rospy.loginfo(f"Coordinate frame correction enabled: Euler ZYX (degrees) = {euler_zyx_deg}")
         else:
-            self.manual_orientation_correction = None
-            self.manual_correction_enabled = False
-        
-        if self.auto_correction_enabled:
-            rospy.loginfo("Automatic orientation correction enabled: will test all 90/180 degree combinations")
-        
-        # Pose stability parameters (from config file nested structure)
-        self.pose_history_max_size = rospy.get_param('~pose_stability/pose_stability_history_size',
-                                                     rospy.get_param('~pose_stability_history_size', 30))
-        self.pose_stability_threshold = rospy.get_param('~pose_stability/pose_stability_threshold',
-                                                        rospy.get_param('~pose_stability_threshold', 0.02))
-        self.pose_stability_orientation_threshold = rospy.get_param('~pose_stability/pose_stability_orientation_threshold',
-                                                                   rospy.get_param('~pose_stability_orientation_threshold', 2.0))
-        self.pose_stability_min_samples = rospy.get_param('~pose_stability/pose_stability_min_samples',
-                                                          rospy.get_param('~pose_stability_min_samples', 20))
+            self.coord_correction_matrix = None
+            self.coord_correction_euler_deg = None
+            rospy.loginfo("Coordinate frame correction disabled")
         
         # Pose quality thresholds for publishing (from config file nested structure)
         self.publish_position_error_threshold = rospy.get_param('~publish_quality/publish_position_error_threshold',
@@ -293,9 +291,11 @@ class FoundationPoseNode:
         self.pose_pub = rospy.Publisher('~pose', PoseStamped, queue_size=10)
         self.marker_pub = rospy.Publisher('~markers', MarkerArray, queue_size=10)
         
-        # Subscriber for ground truth pose
+        # Subscriber for ground truth pose (topic based on object name)
+        gt_topic = f'/{self.object_name}/ground_truth_pose'
+        rospy.loginfo(f"Subscribing to Ground Truth: {gt_topic}")
         self.gt_pose_sub = rospy.Subscriber(
-            '/mustard_bottle/ground_truth_pose', 
+            gt_topic, 
             PoseStamped, 
             self.gt_pose_callback,
             queue_size=1  # Small queue for latest pose only
@@ -319,6 +319,10 @@ class FoundationPoseNode:
             rospy.loginfo(f"Computed to_origin transformation from oriented bounds")
             rospy.loginfo(f"Oriented bounds extents: {extents}")
             
+            # Store extents and compute bbox for visualization (same as run_demo.py)
+            self.extents = extents
+            self.bbox = np.stack([-extents/2, extents/2], axis=0).reshape(2,3)
+            
             # Check mesh orientation and bounds for debugging
             if self.mesh.vertices.shape[0] > 0:
                 min_bounds = self.mesh.vertices.min(axis=0)
@@ -336,6 +340,35 @@ class FoundationPoseNode:
         """Initialize FoundationPose estimator."""
         rospy.loginfo("Initializing FoundationPose...")
         try:
+            # Clear CUDA cache before initialization to reduce memory fragmentation
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    rospy.loginfo("Cleared CUDA cache before FoundationPose initialization")
+            except Exception as e:
+                rospy.logwarn(f"Could not clear CUDA cache: {e}")
+            
+            # Get package path for debug folders (before FoundationPose initialization)
+            try:
+                import rospkg
+                rospack = rospkg.RosPack()
+                self.package_path = rospack.get_path('final-project-OfficialBishal')
+            except Exception as e:
+                rospy.logwarn(f"Could not get package path using rospack: {e}")
+                # Fallback to workspace root
+                self.package_path = os.path.join(os.path.expanduser('~'), 'hsr_robocanes_omniverse', 'src', 'final-project-OfficialBishal')
+            
+            # Create debug folder in our package for FoundationPose internal debug
+            foundationpose_debug_dir = os.path.join(self.package_path, 'debug', 'foundationpose')
+            os.makedirs(foundationpose_debug_dir, exist_ok=True)
+            
+            # Create track_vis folder for our visualization images
+            self.debug_dir = os.path.join(self.package_path, 'debug', 'track_vis')
+            os.makedirs(self.debug_dir, exist_ok=True)
+            rospy.loginfo(f"FoundationPose debug will be saved to: {foundationpose_debug_dir}")
+            rospy.loginfo(f"Track visualization will be saved to: {self.debug_dir}")
+            
             self.scorer = ScorePredictor()
             self.refiner = PoseRefinePredictor()
             self.glctx = dr.RasterizeCudaContext()
@@ -348,7 +381,7 @@ class FoundationPoseNode:
                 refiner=self.refiner,
                 glctx=self.glctx,
                 debug=self.debug,
-                debug_dir=os.path.join(os.path.expanduser('~'), '.ros', 'foundationpose_debug')
+                debug_dir=foundationpose_debug_dir  # Use our project folder
             )
             rospy.loginfo("FoundationPose initialized successfully")
         except Exception as e:
@@ -526,39 +559,105 @@ class FoundationPoseNode:
                     rospy.logwarn_throttle(5.0, f"Provided mask too small ({ob_mask.sum()} pixels). Pose estimation may fail.")
             
             # Estimate pose
-            if not self.pose_initialized:
-                rospy.loginfo("Performing initial pose registration...")
-                try:
-                    pose = self.estimator.register(
-                        K=self.camera_K,
-                        rgb=rgb_image,
-                        depth=depth_image,
-                        ob_mask=ob_mask,
-                        iteration=self.est_refine_iter
-                    )
-                    self.pose_initialized = True
-                    rospy.loginfo("Pose initialized successfully")
-                except Exception as e:
-                    rospy.logerr(f"Pose registration failed: {e}")
-                    rospy.logwarn("Will retry registration on next frame...")
-                    return  # Skip this frame, try again next time
-            else:
-                # Use tracking (faster, but can drift over time)
-                pose = self.estimator.track_one(
+            # Clear CUDA cache before pose registration to reduce memory fragmentation
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass  # Ignore if torch not available
+            
+            # Always perform registration (tracking disabled for now)
+            rospy.loginfo("Performing pose registration...")
+            try:
+                pose = self.estimator.register(
+                    K=self.camera_K,
                     rgb=rgb_image,
                     depth=depth_image,
-                    K=self.camera_K,
-                    iteration=self.track_refine_iter
+                    ob_mask=ob_mask,
+                    iteration=self.est_refine_iter
                 )
-                rospy.loginfo_throttle(5.0, "Tracking pose... (publishing at ~24Hz)")
+                self.pose_initialized = True
+                rospy.loginfo("Pose registration successful")
+            except Exception as e:
+                rospy.logerr(f"Pose registration failed: {e}")
+                # Aggressive memory cleanup after failure
+                try:
+                    import torch
+                    import gc
+                    if torch.cuda.is_available():
+                        # Clear cache multiple times
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                        # Force Python garbage collection
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        rospy.loginfo("Performed aggressive CUDA memory cleanup")
+                except Exception:
+                    pass
+                rospy.logwarn("Will retry registration on next frame...")
+                # Add a delay to let memory free up before retry
+                rospy.sleep(1.0)
+                return  # Skip this frame, try again next time
             
+            # If we reach here, pose was successfully assigned
             self.last_pose = pose
             
             # Apply to_origin transformation to match run_demo.py behavior
-            # FoundationPose returns pose in centered mesh coordinate system
+            # FoundationPose returns pose in centered mesh coordinate system (center at origin)
             # We need to transform it back to original mesh coordinate system (with oriented bounds alignment)
             # This is the same transformation applied in run_demo.py line 69: center_pose = pose@np.linalg.inv(to_origin)
+            # Note: to_origin moves the center of the bounding box to the origin, so inv(to_origin) moves origin back to center
+            # The pose position should already be at the center (origin in centered frame)
             pose_corrected = pose @ np.linalg.inv(self.to_origin)
+            
+            # Debug: Log the to_origin translation to understand the center offset
+            if self.debug >= 2 and not hasattr(self, '_to_origin_translation_logged'):
+                to_origin_translation = self.to_origin[:3, 3]
+                inv_to_origin_translation = np.linalg.inv(self.to_origin)[:3, 3]
+                rospy.loginfo(f">>> [MESH_CENTER] to_origin translation (moves center to origin): {to_origin_translation}")
+                rospy.loginfo(f">>> [MESH_CENTER] inv(to_origin) translation (moves origin to center): {inv_to_origin_translation}")
+                rospy.loginfo(f">>> [MESH_CENTER] Pose position before inv(to_origin): {pose[:3, 3]}")
+                rospy.loginfo(f">>> [MESH_CENTER] Pose position after inv(to_origin): {pose_corrected[:3, 3]}")
+                rospy.loginfo(f">>> [MESH_CENTER] Mesh extents: {self.extents}")
+                self._to_origin_translation_logged = True
+            
+            # Apply coordinate frame correction in camera frame BEFORE error calculation
+            # Check if correction should be applied based on Z-axis direction
+            correction_applied_cam = False
+            if self.coord_correction_enabled and self.coord_correction_matrix is not None:
+                from scipy.spatial.transform import Rotation
+                R_cam = pose_corrected[:3, :3]
+                
+                # Check if blue axis (Z-axis) is pointing down in camera frame
+                # Z-axis in object frame is [0, 0, 1], transform to camera frame
+                z_axis_obj = np.array([0, 0, 1])
+                z_axis_cam = R_cam @ z_axis_obj
+                
+                # In camera frame, "down" typically means negative Y or we check if Z-axis points downward
+                # Check if the Z-axis is pointing more downward than upward (dot product with camera's down direction)
+                # Camera frame: X right, Y down, Z forward
+                # So "down" in camera frame is negative Y direction [0, -1, 0]
+                camera_down = np.array([0, -1, 0])
+                z_axis_dot_down = np.dot(z_axis_cam, camera_down)
+                
+                # Apply correction only if Z-axis is pointing down (dot product > threshold, e.g., > 0.5)
+                if z_axis_dot_down > 0.5:
+                    # Apply correction: R_corrected = R_corr @ R_cam
+                    R_corrected_cam = self.coord_correction_matrix @ R_cam
+                    # Update pose_corrected with corrected rotation
+                    pose_corrected[:3, :3] = R_corrected_cam
+                    # Position remains unchanged
+                    correction_applied_cam = True
+                # Removed verbose debug prints for camera frame correction
+            
+            # Store flag for error calculation - if correction wasn't applied in camera frame but will be in odom frame,
+            # we need to apply it for accurate error calculation
+            self._correction_applied_cam = correction_applied_cam
+            
+            # NOTE: Coordinate frame correction is also applied AFTER transforming to odom frame
+            # in publish_pose() and publish_markers() for RViz visualization consistency
             
             # Debug: Log transformation details (throttled, only once)
             if self.debug >= 2 and not hasattr(self, '_to_origin_debug_logged'):
@@ -577,47 +676,44 @@ class FoundationPoseNode:
                 rospy.loginfo(f"Rotation after (euler ZYX): {rot_after.as_euler('zyx', degrees=True)}")
                 rospy.loginfo("="*60)
                 self._to_origin_debug_logged = True
-            
-            # Apply orientation correction
-            if self.auto_correction_enabled and not self.correction_tested:
-                # Track pose history for stability checking
-                if self.pose_initialized:
-                    self._update_pose_history(pose_corrected)
-                    
-                    # Check if pose has stabilized
-                    if self._is_pose_stable():
-                        # Pose is stable, check error and test corrections if needed
-                        error = self._check_orientation_error(pose_corrected)
-                        if error is not None and error > self.auto_correction_error_threshold:
-                            rospy.loginfo(f"Pose stabilized. Orientation error ({error:.2f}°) exceeds threshold ({self.auto_correction_error_threshold}°). Testing all corrections...")
-                            pose_corrected = self._test_and_find_best_correction(pose_corrected, header)
-                        else:
-                            # Error is acceptable, no correction needed
-                            self.correction_tested = True
-                            if error is not None:
-                                rospy.loginfo(f"Pose stabilized. Orientation error ({error:.2f}°) is acceptable. No correction needed.")
-                            else:
-                                rospy.loginfo("Pose stabilized. No ground truth available. No correction applied.")
-                    else:
-                        # Still collecting samples or pose not stable yet
-                        samples = len(self.pose_history)
-                        if samples < self.pose_stability_min_samples:
-                            rospy.loginfo_throttle(2.0, f"Collecting pose samples for stability check: {samples}/{self.pose_stability_min_samples}...")
-                        else:
-                            rospy.loginfo_throttle(2.0, f"Pose not yet stable ({samples} samples collected). Waiting for convergence...")
-            elif self.auto_correction_enabled and self.correction_tested and self.best_correction is not None:
-                # Apply the correction (default or best found)
-                correction_matrix = np.eye(4)
-                correction_matrix[:3, :3] = self.best_correction
-                pose_corrected = pose_corrected @ correction_matrix
-                # Log periodically to confirm correction is being applied
-                rospy.loginfo_throttle(10.0, "Applying orientation correction (best fit from testing)")
-            elif self.manual_correction_enabled:
-                # Apply manual correction
-                correction_matrix = np.eye(4)
-                correction_matrix[:3, :3] = self.manual_orientation_correction
-                pose_corrected = pose_corrected @ correction_matrix
-                rospy.loginfo_throttle(5.0, "Applied manual orientation correction")
+
+            # Save the visualization with the box (when debug >= 2)
+            if self.debug >= 2:
+                # Draw 3D box and axes on the image (same as run_demo.py lines 70-71)
+                # Note: pose_corrected is already the center_pose (pose @ inv(to_origin))
+                # Work in RGB throughout - only convert to BGR temporarily for draw_posed_3d_box (uses cv2.line which expects BGR)
+                vis_rgb = rgb_image.copy()
+                # Convert to BGR only for draw_posed_3d_box (cv2.line expects BGR)
+                vis_bgr = cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR)
+                vis_bgr = draw_posed_3d_box(self.camera_K, img=vis_bgr, ob_in_cam=pose_corrected, bbox=self.bbox)
+                # Convert back to RGB for draw_xyz_axis (expects RGB when is_input_rgb=True, returns RGB)
+                vis_rgb = cv2.cvtColor(vis_bgr, cv2.COLOR_BGR2RGB)
+                vis = draw_xyz_axis(vis_rgb, ob_in_cam=pose_corrected, scale=0.1, K=self.camera_K, thickness=3, transparency=0, is_input_rgb=True)
+                
+                # Save the visualization image in RGB format
+                import time
+                timestamp = int(time.time() * 1000)  # Use timestamp as filename
+                image_path = os.path.join(self.debug_dir, f'{timestamp}.png')
+                imageio.imwrite(image_path, vis)
+                rospy.loginfo_throttle(2.0, f"Saved visualization to: {image_path}")
+                
+                # Debug: Log pose information for orientation investigation
+                if not hasattr(self, '_orientation_debug_logged'):
+                    from scipy.spatial.transform import Rotation
+                    R = pose_corrected[:3, :3]
+                    t = pose_corrected[:3, 3]
+                    rot = Rotation.from_matrix(R)
+                    euler_zyx = rot.as_euler('zyx', degrees=True)
+                    quat = rot.as_quat()  # [x, y, z, w]
+                    rospy.loginfo("="*60)
+                    rospy.loginfo("POSE ORIENTATION DEBUG (track_vis)")
+                    rospy.loginfo("="*60)
+                    rospy.loginfo(f"Position (camera frame): [{t[0]:.4f}, {t[1]:.4f}, {t[2]:.4f}]")
+                    rospy.loginfo(f"Quaternion (camera frame): [{quat[0]:.4f}, {quat[1]:.4f}, {quat[2]:.4f}, {quat[3]:.4f}]")
+                    rospy.loginfo(f"Euler ZYX (degrees): [{euler_zyx[0]:.2f}, {euler_zyx[1]:.2f}, {euler_zyx[2]:.2f}]")
+                    rospy.loginfo(f"Rotation matrix:\n{R}")
+                    rospy.loginfo("="*60)
+                    self._orientation_debug_logged = True
             
             # Check pose quality before publishing (only publish if error is acceptable)
             quality_check = self._check_pose_quality(pose_corrected)
@@ -684,7 +780,45 @@ class FoundationPoseNode:
                 self._tf_transform_warning_logged = True
             pose_msg = pose_msg_camera
         
+        # Apply coordinate frame correction (same as in publish_markers) for consistency
+        # Only apply if blue axis (Z-axis) is pointing down
+        if self.coord_correction_enabled and self.coord_correction_matrix is not None:
+            import numpy as np
+            from scipy.spatial.transform import Rotation
+            
+            # Convert pose_msg to matrix
+            quat_before = np.array([
+                pose_msg.pose.orientation.x,
+                pose_msg.pose.orientation.y,
+                pose_msg.pose.orientation.z,
+                pose_msg.pose.orientation.w
+            ])
+            R_odom = Rotation.from_quat(quat_before).as_matrix()
+            
+            # Check if blue axis (Z-axis) is pointing down in odom frame
+            # Z-axis in object frame is [0, 0, 1], transform to odom frame
+            z_axis_obj = np.array([0, 0, 1])
+            z_axis_odom = R_odom @ z_axis_obj
+            
+            # In odom frame (ROS convention: X forward, Y left, Z up), "down" is negative Z
+            # Check if Z-axis is pointing down (negative Z component)
+            z_axis_z_component = z_axis_odom[2]
+            
+            # Apply correction only if Z-axis is pointing down (z_component < -0.5)
+            if z_axis_z_component < -0.5:
+                # Apply correction: only rotate orientation, keep position unchanged
+                R_corrected = self.coord_correction_matrix @ R_odom
+                quat_corrected = Rotation.from_matrix(R_corrected).as_quat()
+                
+                # Update pose_msg with corrected orientation
+                pose_msg.pose.orientation.x = quat_corrected[0]
+                pose_msg.pose.orientation.y = quat_corrected[1]
+                pose_msg.pose.orientation.z = quat_corrected[2]
+                pose_msg.pose.orientation.w = quat_corrected[3]
+                # Position remains unchanged
+        
         # Publish transformed pose (in odom frame if transform succeeded, camera frame otherwise)
+        # This pose includes coordinate frame correction if enabled
         self.pose_pub.publish(pose_msg)
         
         # Publish as TF transform (in camera frame - this is the actual object pose)
@@ -701,69 +835,6 @@ class FoundationPoseNode:
         transform_tf.transform.rotation.w = quat[3]
         
         self.tf_broadcaster.sendTransform(transform_tf)
-    
-    # ========================================================================
-    # Orientation Correction Testing
-    # ========================================================================
-    
-    def _generate_rotation_combinations(self):
-        """
-        Generate all combinations of 90 and 180 degree rotations around x, y, z axes.
-        
-        Returns:
-            list: List of (rotation_matrix, description) tuples
-        """
-        from scipy.spatial.transform import Rotation
-        
-        combinations = []
-        angles = [0, 90, 180]  # degrees
-        
-        for x_angle in angles:
-            for y_angle in angles:
-                for z_angle in angles:
-                    # Skip identity (0, 0, 0)
-                    if x_angle == 0 and y_angle == 0 and z_angle == 0:
-                        continue
-                    
-                    # Create rotation from Euler angles (ZYX convention)
-                    rot = Rotation.from_euler('zyx', [z_angle, y_angle, x_angle], degrees=True)
-                    rot_matrix = rot.as_matrix()
-                    description = f"X:{x_angle}° Y:{y_angle}° Z:{z_angle}°"
-                    combinations.append((rot_matrix, description))
-        
-        return combinations
-    
-    def _check_orientation_error(self, pose_corrected):
-        """
-        Check the orientation error of the current pose compared to ground truth.
-        
-        Args:
-            pose_corrected: Pose after to_origin transformation
-            
-        Returns:
-            float: Orientation error in degrees, or None if no ground truth available
-        """
-        if self.gt_pose is None or not hasattr(self, 'gt_pose_camera_frame') or self.gt_pose_camera_frame is None:
-            return None
-        
-        from scipy.spatial.transform import Rotation
-        
-        # Get ground truth pose in camera frame
-        gt_pose_for_comparison = self.gt_pose_camera_frame
-        _, quat_gt = self._extract_pose_arrays(gt_pose_for_comparison)
-        rot_gt = Rotation.from_quat(quat_gt)
-        R_gt = rot_gt.as_matrix()
-        
-        # Extract estimated rotation
-        R_est = pose_corrected[:3, :3]
-        
-        # Calculate orientation error
-        R_diff = R_est @ R_gt.T
-        rot_diff = Rotation.from_matrix(R_diff)
-        angle_error_rad = np.linalg.norm(rot_diff.as_rotvec())
-        angle_error_deg = angle_error_rad * 180 / np.pi
-        
-        return angle_error_deg
     
     def _check_pose_quality(self, pose_corrected):
         """
@@ -800,192 +871,6 @@ class FoundationPoseNode:
         angle_error_deg = angle_error_rad * 180 / np.pi
         
         return (pos_error, angle_error_deg)
-    
-    def _update_pose_history(self, pose):
-        """
-        Update pose history for stability checking.
-        
-        Args:
-            pose: 4x4 transformation matrix
-        """
-        from scipy.spatial.transform import Rotation
-        
-        # Extract position and orientation
-        t = pose[:3, 3]
-        R = pose[:3, :3]
-        rot = Rotation.from_matrix(R)
-        quat = rot.as_quat()
-        
-        # Store pose data
-        pose_data = {
-            'position': t.copy(),
-            'quaternion': quat.copy(),
-            'rotation_matrix': R.copy()
-        }
-        
-        # Add to history
-        self.pose_history.append(pose_data)
-        
-        # Keep only recent poses
-        if len(self.pose_history) > self.pose_history_max_size:
-            self.pose_history.pop(0)
-    
-    def _is_pose_stable(self):
-        """
-        Check if pose has stabilized by analyzing recent pose history.
-        
-        Returns:
-            bool: True if pose is stable, False otherwise
-        """
-        # Need minimum samples before checking stability
-        if len(self.pose_history) < self.pose_stability_min_samples:
-            return False
-        
-        from scipy.spatial.transform import Rotation
-        
-        # Get recent poses (last N samples)
-        recent_poses = self.pose_history[-self.pose_stability_min_samples:]
-        
-        # Calculate position variance
-        positions = np.array([p['position'] for p in recent_poses])
-        pos_mean = np.mean(positions, axis=0)
-        pos_std = np.std(positions, axis=0)
-        max_pos_std = np.max(pos_std)
-        
-        # Calculate orientation variance
-        orientations = [Rotation.from_quat(p['quaternion']) for p in recent_poses]
-        # Use rotation vector magnitude as orientation change metric
-        orientation_changes = []
-        for i in range(1, len(orientations)):
-            R_diff = orientations[i].as_matrix() @ orientations[i-1].as_matrix().T
-            rot_diff = Rotation.from_matrix(R_diff)
-            angle_change = np.linalg.norm(rot_diff.as_rotvec()) * 180 / np.pi  # degrees
-            orientation_changes.append(angle_change)
-        
-        max_orientation_change = np.max(orientation_changes) if orientation_changes else 0.0
-        
-        # Check if both position and orientation are stable
-        pos_stable = max_pos_std < self.pose_stability_threshold
-        orient_stable = max_orientation_change < self.pose_stability_orientation_threshold
-        
-        # Log stability status periodically
-        if not hasattr(self, '_last_stability_check_time'):
-            self._last_stability_check_time = 0
-        
-        current_time = rospy.get_time()
-        if current_time - self._last_stability_check_time >= 2.0:  # Log every 2 seconds
-            rospy.loginfo_throttle(2.0, 
-                f"Pose stability check: pos_std={max_pos_std:.4f}m (threshold={self.pose_stability_threshold:.4f}m), "
-                f"orient_change={max_orientation_change:.2f}° (threshold={self.pose_stability_orientation_threshold:.2f}°), "
-                f"stable={pos_stable and orient_stable}")
-            self._last_stability_check_time = current_time
-        
-        return pos_stable and orient_stable
-    
-    def _test_and_find_best_correction(self, pose_corrected, header):
-        """
-        Test all rotation combinations and find the one with lowest error compared to ground truth.
-        
-        Args:
-            pose_corrected: Pose after to_origin transformation
-            header: ROS message header
-            
-        Returns:
-            numpy.ndarray: Best corrected pose
-        """
-        if self.gt_pose is None or not hasattr(self, 'gt_pose_camera_frame') or self.gt_pose_camera_frame is None:
-            # No ground truth yet, cannot test
-            rospy.logwarn("No ground truth available. Cannot test orientation corrections.")
-            self.correction_tested = True
-            return pose_corrected
-        
-        from scipy.spatial.transform import Rotation
-        
-        rospy.loginfo("="*70)
-        rospy.loginfo("TESTING ALL ORIENTATION CORRECTION COMBINATIONS")
-        rospy.loginfo("="*70)
-        
-        # Get ground truth pose in camera frame
-        gt_pose_for_comparison = self.gt_pose_camera_frame
-        t_gt, quat_gt = self._extract_pose_arrays(gt_pose_for_comparison)
-        rot_gt = Rotation.from_quat(quat_gt)
-        R_gt = rot_gt.as_matrix()
-        
-        # Generate all rotation combinations
-        combinations = self._generate_rotation_combinations()
-        rospy.loginfo(f"Testing {len(combinations)} rotation combinations...")
-        
-        best_error = float('inf')
-        best_correction = None
-        best_description = None
-        best_pose = None
-        
-        results = []
-        
-        for correction_matrix, description in combinations:
-            # Apply correction
-            correction_4x4 = np.eye(4)
-            correction_4x4[:3, :3] = correction_matrix
-            test_pose = pose_corrected @ correction_4x4
-            
-            # Extract rotation
-            R_test = test_pose[:3, :3]
-            t_test = test_pose[:3, 3]
-            
-            # Calculate orientation error
-            R_diff = R_test @ R_gt.T
-            rot_diff = Rotation.from_matrix(R_diff)
-            angle_error_rad = np.linalg.norm(rot_diff.as_rotvec())
-            angle_error_deg = angle_error_rad * 180 / np.pi
-            
-            # Calculate position error
-            pos_error = np.linalg.norm(t_test - t_gt)
-            
-            # Combined error (weighted: orientation is more important)
-            total_error = angle_error_deg + pos_error * 10.0  # 10cm = 1 degree
-            
-            results.append({
-                'description': description,
-                'angle_error': angle_error_deg,
-                'pos_error': pos_error,
-                'total_error': total_error,
-                'correction': correction_matrix
-            })
-            
-            if total_error < best_error:
-                best_error = total_error
-                best_correction = correction_matrix
-                best_description = description
-                best_pose = test_pose
-        
-        # Sort results by error
-        results.sort(key=lambda x: x['total_error'])
-        
-        # Print top 5 results
-        rospy.loginfo("\nTop 5 correction combinations:")
-        for i, result in enumerate(results[:5]):
-            rospy.loginfo(f"  {i+1}. {result['description']}: "
-                         f"angle_error={result['angle_error']:.2f}°, "
-                         f"pos_error={result['pos_error']:.4f}m, "
-                         f"total_error={result['total_error']:.2f}")
-        
-        # Set best correction
-        if best_correction is not None:
-            self.best_correction = best_correction
-            self.correction_tested = True
-            rospy.loginfo("\n" + "="*70)
-            rospy.loginfo(f"BEST CORRECTION FOUND: {best_description}")
-            rospy.loginfo(f"  Angle error: {results[0]['angle_error']:.2f}°")
-            rospy.loginfo(f"  Position error: {results[0]['pos_error']:.4f}m")
-            rospy.loginfo(f"  Total error: {results[0]['total_error']:.2f}")
-            rospy.loginfo("="*70)
-            rospy.loginfo("This correction will be applied to all subsequent poses.")
-        else:
-            rospy.logwarn("No correction found better than identity. Using original pose.")
-            self.best_correction = np.eye(3)  # Identity
-            self.correction_tested = True
-        
-        return best_pose if best_pose is not None else pose_corrected
     
     # ========================================================================
     # Utility Methods
@@ -1166,16 +1051,16 @@ class FoundationPoseNode:
         """Check if ground truth topic exists and has publishers."""
         import sys
         try:
-            topic = '/mustard_bottle/ground_truth_pose'
+            topic = f'/{self.object_name}/ground_truth_pose'
             pub_list = rospy.get_published_topics()
             topic_exists = any(t[0] == topic for t in pub_list)
             if topic_exists:
                 print(f"[FOUNDATIONPOSE] Ground truth topic exists: {topic}", file=sys.stderr, flush=True)
             else:
                 print(f"[FOUNDATIONPOSE] Ground truth topic NOT found: {topic}", file=sys.stderr, flush=True)
-                print(f"[FOUNDATIONPOSE] Available topics with 'mustard' or 'ground_truth':", file=sys.stderr, flush=True)
+                print(f"[FOUNDATIONPOSE] Available topics with '{self.object_name}' or 'ground_truth':", file=sys.stderr, flush=True)
                 for t, msg_type in pub_list:
-                    if 'mustard' in t.lower() or 'ground_truth' in t.lower() or 'pose' in t.lower():
+                    if self.object_name.lower() in t.lower() or 'ground_truth' in t.lower() or 'pose' in t.lower():
                         print(f"  - {t} ({msg_type})", file=sys.stderr, flush=True)
         except Exception as e:
             print(f"[FOUNDATIONPOSE] Error checking topic: {e}", file=sys.stderr, flush=True)
@@ -1284,16 +1169,29 @@ class FoundationPoseNode:
             self._gt_wait_count += 1
             if self._gt_wait_count % 100 == 1:  # Every ~4 seconds at 24Hz
                 import sys
+                gt_topic = f'/{self.object_name}/ground_truth_pose'
                 print(f"[FOUNDATIONPOSE] Still waiting for ground truth pose (checked {self._gt_wait_count} times). "
-                      f"Topic: /mustard_bottle/ground_truth_pose", file=sys.stderr, flush=True)
-                rospy.logwarn_throttle(5.0, "Waiting for ground truth pose from /mustard_bottle/ground_truth_pose topic...")
+                      f"Topic: {gt_topic}", file=sys.stderr, flush=True)
+                rospy.logwarn_throttle(5.0, f"Waiting for ground truth pose from {gt_topic} topic...")
             return
         
         from scipy.spatial.transform import Rotation
         
         # Extract estimated pose
-        R_est = estimated_pose[:3, :3]
-        t_est = estimated_pose[:3, 3]
+        # IMPORTANT: If coordinate frame correction was applied in odom frame but not in camera frame,
+        # we need to apply it here for accurate error calculation
+        estimated_pose_for_error = estimated_pose.copy()
+        if (hasattr(self, '_correction_applied_cam') and not self._correction_applied_cam and 
+            self.coord_correction_enabled and self.coord_correction_matrix is not None):
+            # Correction wasn't applied in camera frame, but it will be in odom frame
+            # Apply it here for consistent error calculation
+            R_est_uncorrected = estimated_pose[:3, :3]
+            R_est_corrected = self.coord_correction_matrix @ R_est_uncorrected
+            estimated_pose_for_error[:3, :3] = R_est_corrected
+            # Removed verbose debug print for error calculation correction
+        
+        R_est = estimated_pose_for_error[:3, :3]
+        t_est = estimated_pose_for_error[:3, 3]
         rot_est = Rotation.from_matrix(R_est)
         quat_est = rot_est.as_quat()  # [x, y, z, w]
         
@@ -1331,10 +1229,51 @@ class FoundationPoseNode:
         
         # Calculate errors
         pos_error = np.linalg.norm(t_est - t_gt)
+        
+        # Calculate orientation error using rotation matrix difference
+        # This handles quaternion sign ambiguity correctly (q and -q represent same rotation)
         R_diff = R_est @ R_gt.T
         rot_diff = Rotation.from_matrix(R_diff)
         angle_error_rad = np.linalg.norm(rot_diff.as_rotvec())
         angle_error_deg = angle_error_rad * 180 / np.pi
+        
+        # Handle the case where the error is close to 180° - this might indicate
+        # that the quaternions have opposite signs but represent the same orientation
+        # Check if quaternions are negated versions of each other
+        quat_est_normalized = quat_est / np.linalg.norm(quat_est)
+        quat_gt_normalized = quat_gt / np.linalg.norm(quat_gt)
+        
+        # Check both q and -q (quaternion sign ambiguity)
+        dot_product_1 = np.abs(np.dot(quat_est_normalized, quat_gt_normalized))
+        dot_product_2 = np.abs(np.dot(quat_est_normalized, -quat_gt_normalized))
+        max_dot = max(dot_product_1, dot_product_2)
+        
+        # Removed verbose debug print for quaternion dot products
+        
+        # If quaternions are nearly opposite (dot product close to 1), the actual error is small
+        # The rotation matrix method should handle this, but if angle is ~180°, check quaternion alignment
+        # Lower threshold to 0.9 to catch more cases
+        if angle_error_deg > 90 and max_dot > 0.9:
+            # Quaternions are nearly aligned (possibly with sign flip), recalculate error
+            # Use the better-aligned quaternion
+            if dot_product_2 > dot_product_1:
+                quat_gt_aligned = -quat_gt_normalized
+            else:
+                quat_gt_aligned = quat_gt_normalized
+            
+            rot_est = Rotation.from_quat(quat_est_normalized)
+            rot_gt_aligned = Rotation.from_quat(quat_gt_aligned)
+            R_est_aligned = rot_est.as_matrix()
+            R_gt_aligned = rot_gt_aligned.as_matrix()
+            R_diff_aligned = R_est_aligned @ R_gt_aligned.T
+            rot_diff_aligned = Rotation.from_matrix(R_diff_aligned)
+            angle_error_rad_aligned = np.linalg.norm(rot_diff_aligned.as_rotvec())
+            angle_error_deg_aligned = angle_error_rad_aligned * 180 / np.pi
+            
+            # Use the smaller error (should be the correct one)
+            if angle_error_deg_aligned < angle_error_deg:
+                angle_error_deg = angle_error_deg_aligned
+                # Removed verbose debug print for quaternion sign ambiguity
         
         # Print comparison (use print for visibility, throttled)
         if not hasattr(self, '_last_comparison_time'):
@@ -1421,6 +1360,18 @@ class FoundationPoseNode:
             print(f"\n--- Error Metrics (both poses in {gt_actual_frame} frame) ---", file=sys.stderr, flush=True)
             print(f"  Position error:    {pos_error:.4f} m", file=sys.stderr, flush=True)
             print(f"  Orientation error: {angle_error_deg:.2f} degrees", file=sys.stderr, flush=True)
+            
+            # Debug: Check if quaternions are nearly opposite (quaternion sign ambiguity)
+            quat_est_normalized = quat_est / np.linalg.norm(quat_est)
+            quat_gt_normalized = quat_gt / np.linalg.norm(quat_gt)
+            dot_product_1 = np.abs(np.dot(quat_est_normalized, quat_gt_normalized))
+            dot_product_2 = np.abs(np.dot(quat_est_normalized, -quat_gt_normalized))
+            max_dot = max(dot_product_1, dot_product_2)
+            
+            if angle_error_deg > 90 and max_dot > 0.99:
+                print(f"  NOTE: Quaternion sign ambiguity detected (dot product: {max_dot:.4f}). "
+                      f"Actual error may be smaller than reported.", file=sys.stderr, flush=True)
+            
             print("="*60, file=sys.stderr, flush=True)
             
             # Also print ground truth in all coordinate systems periodically
@@ -1447,6 +1398,7 @@ class FoundationPoseNode:
             header: ROS message header
         """
         from scipy.spatial.transform import Rotation
+        import numpy as np  # Import at function level to avoid issues
         
         marker_array = MarkerArray()
         
@@ -1460,7 +1412,140 @@ class FoundationPoseNode:
             rospy.logwarn_throttle(5.0, "Could not transform marker to odom frame, using camera frame")
             pose_odom = pose_camera
         
+        # Apply coordinate frame correction AFTER transforming to odom frame
+        # This ensures the correction is applied in the frame where RViz visualizes (odom)
+        if self.coord_correction_enabled and self.coord_correction_matrix is not None:
+            from scipy.spatial.transform import Rotation
+            # Convert pose_odom to matrix
+            pos_odom = np.array([
+                pose_odom.pose.position.x,
+                pose_odom.pose.position.y,
+                pose_odom.pose.position.z
+            ])
+            quat_odom_before = np.array([
+                pose_odom.pose.orientation.x,
+                pose_odom.pose.orientation.y,
+                pose_odom.pose.orientation.z,
+                pose_odom.pose.orientation.w
+            ])
+            R_odom = Rotation.from_quat(quat_odom_before).as_matrix()
+            euler_odom_before = Rotation.from_quat(quat_odom_before).as_euler('zyx', degrees=True)
+            
+            # Check if blue axis (Z-axis) is pointing down in odom frame
+            # Z-axis in object frame is [0, 0, 1], transform to odom frame
+            z_axis_obj = np.array([0, 0, 1])
+            z_axis_odom = R_odom @ z_axis_obj
+            
+            # In odom frame (ROS convention: X forward, Y left, Z up), "down" is negative Z
+            # Check if Z-axis is pointing down (negative Z component)
+            z_axis_z_component = z_axis_odom[2]
+            
+            # Only apply correction if Z-axis is pointing down
+            should_apply_correction = z_axis_z_component < -0.5
+            
+            # Removed verbose debug prints for BEFORE correction
+            
+            # Apply correction only if Z-axis is pointing down
+            if should_apply_correction:
+                # Apply correction: only rotate orientation, keep position unchanged
+                R_corrected = self.coord_correction_matrix @ R_odom
+                quat_corrected = Rotation.from_matrix(R_corrected).as_quat()
+                euler_odom_after = Rotation.from_quat(quat_corrected).as_euler('zyx', degrees=True)
+            else:
+                # No correction applied, use original values
+                quat_corrected = quat_odom_before
+                euler_odom_after = euler_odom_before
+                R_corrected = R_odom
+            
+            # Removed verbose debug prints for AFTER correction
+            
+            # Update pose_odom with corrected orientation (or original if no correction applied)
+            pose_odom.pose.orientation.x = quat_corrected[0]
+            pose_odom.pose.orientation.y = quat_corrected[1]
+            pose_odom.pose.orientation.z = quat_corrected[2]
+            pose_odom.pose.orientation.w = quat_corrected[3]
+            # Position remains unchanged
+        
+        # Debug: Log orientation comparison between camera frame (track_vis) and odom frame (RViz)
+        if self.debug >= 2 and not hasattr(self, '_rviz_orientation_debug_logged'):
+            from scipy.spatial.transform import Rotation
+            
+            # Camera frame orientation (what's shown in track_vis)
+            R_cam = pose[:3, :3]
+            rot_cam = Rotation.from_matrix(R_cam)
+            quat_cam = rot_cam.as_quat()
+            euler_cam = rot_cam.as_euler('zyx', degrees=True)
+            
+            # Odom frame orientation (what's shown in RViz)
+            quat_odom = pose_odom.pose.orientation
+            rot_odom = Rotation.from_quat([quat_odom.x, quat_odom.y, quat_odom.z, quat_odom.w])
+            euler_odom = rot_odom.as_euler('zyx', degrees=True)
+            
+            # Get the camera-to-odom transform to understand the rotation difference
+            try:
+                latest_time = self.tf_listener.getLatestCommonTime(self.frame_id, 'odom')
+                self.tf_listener.waitForTransform('odom', self.frame_id, latest_time, rospy.Duration(0.1))
+                (trans_cam_to_odom, rot_cam_to_odom) = self.tf_listener.lookupTransform('odom', self.frame_id, latest_time)
+                rot_cam_to_odom_obj = Rotation.from_quat([rot_cam_to_odom[0], rot_cam_to_odom[1], rot_cam_to_odom[2], rot_cam_to_odom[3]])
+                euler_cam_to_odom = rot_cam_to_odom_obj.as_euler('zyx', degrees=True)
+                R_cam_to_odom = rot_cam_to_odom_obj.as_matrix()
+            except Exception as e:
+                rospy.logwarn(f"Could not get camera-to-odom transform: {e}")
+                R_cam_to_odom = None
+                euler_cam_to_odom = None
+            
+            rospy.loginfo("="*60)
+            rospy.loginfo("ORIENTATION COMPARISON: track_vis (camera) vs RViz (odom)")
+            rospy.loginfo("="*60)
+            rospy.loginfo("CAMERA FRAME (track_vis):")
+            rospy.loginfo(f"  Quaternion: [{quat_cam[0]:.4f}, {quat_cam[1]:.4f}, {quat_cam[2]:.4f}, {quat_cam[3]:.4f}]")
+            rospy.loginfo(f"  Euler ZYX (degrees): [{euler_cam[0]:.2f}, {euler_cam[1]:.2f}, {euler_cam[2]:.2f}]")
+            rospy.loginfo("ODOM FRAME (RViz):")
+            rospy.loginfo(f"  Quaternion: [{quat_odom.x:.4f}, {quat_odom.y:.4f}, {quat_odom.z:.4f}, {quat_odom.w:.4f}]")
+            rospy.loginfo(f"  Euler ZYX (degrees): [{euler_odom[0]:.2f}, {euler_odom[1]:.2f}, {euler_odom[2]:.2f}]")
+            if euler_cam_to_odom is not None:
+                rospy.loginfo("CAMERA-TO-ODOM TRANSFORM:")
+                rospy.loginfo(f"  Translation: [{trans_cam_to_odom[0]:.4f}, {trans_cam_to_odom[1]:.4f}, {trans_cam_to_odom[2]:.4f}]")
+                rospy.loginfo(f"  Rotation Euler ZYX (degrees): [{euler_cam_to_odom[0]:.2f}, {euler_cam_to_odom[1]:.2f}, {euler_cam_to_odom[2]:.2f}]")
+                rospy.loginfo(f"  Z-axis rotation difference: {euler_odom[0] - euler_cam[0]:.2f} degrees")
+                rospy.loginfo(f"  Y-axis rotation difference: {euler_odom[1] - euler_cam[1]:.2f} degrees")
+                rospy.loginfo(f"  X-axis rotation difference: {euler_odom[2] - euler_cam[2]:.2f} degrees")
+            rospy.loginfo("="*60)
+            rospy.loginfo("NOTE: The orientation difference is due to coordinate frame conventions:")
+            rospy.loginfo("  - Camera frame: OpenCV convention (X right, Y down, Z forward)")
+            rospy.loginfo("  - Odom frame: ROS convention (X forward, Y left, Z up)")
+            rospy.loginfo("  - The camera-to-odom transform includes the camera's orientation on the robot")
+            rospy.loginfo("="*60)
+            self._rviz_orientation_debug_logged = True
+        
         # Create mesh marker in odom frame
+        # The pose position is at the object's center, but the mesh file has its origin at the bottom.
+        # RViz places the mesh's origin at the marker position, so we need to offset the marker
+        # position down by the offset from center to origin (in the object frame, then transform to odom frame).
+        import numpy as np
+        from scipy.spatial.transform import Rotation
+        
+        # Get object rotation in odom frame (will be reused for axes markers)
+        obj_quat = pose_odom.pose.orientation
+        obj_rot = Rotation.from_quat([obj_quat.x, obj_quat.y, obj_quat.z, obj_quat.w])
+        obj_R = obj_rot.as_matrix()
+        
+        # Calculate offset from mesh origin to center in original mesh frame
+        # inv(to_origin)[:3, 3] is the translation from origin to center
+        inv_to_origin = np.linalg.inv(self.to_origin)
+        mesh_origin_to_center = inv_to_origin[:3, 3]  # In original mesh frame
+        
+        # Transform offset to odom frame
+        mesh_origin_to_center_odom = obj_R @ mesh_origin_to_center
+        
+        # Offset marker position: move DOWN by the offset (since mesh origin is below center)
+        # This ensures the mesh's origin (bottom) is placed at the marker position, so the mesh center aligns with the pose center
+        marker_position = np.array([
+            pose_odom.pose.position.x,
+            pose_odom.pose.position.y,
+            pose_odom.pose.position.z
+        ]) - mesh_origin_to_center_odom
+        
         marker = Marker()
         marker.header = pose_odom.header
         marker.header.frame_id = pose_odom.header.frame_id  # Use odom frame
@@ -1468,9 +1553,9 @@ class FoundationPoseNode:
         marker.id = 0
         marker.type = Marker.MESH_RESOURCE
         marker.action = Marker.ADD
-        marker.pose.position.x = pose_odom.pose.position.x
-        marker.pose.position.y = pose_odom.pose.position.y
-        marker.pose.position.z = pose_odom.pose.position.z
+        marker.pose.position.x = marker_position[0]
+        marker.pose.position.y = marker_position[1]
+        marker.pose.position.z = marker_position[2]
         marker.pose.orientation.x = pose_odom.pose.orientation.x
         marker.pose.orientation.y = pose_odom.pose.orientation.y
         marker.pose.orientation.z = pose_odom.pose.orientation.z
@@ -1493,15 +1578,12 @@ class FoundationPoseNode:
         axis_colors = self.AXIS_COLORS
         axis_names = self.AXIS_NAMES
         
-        # Get object position and orientation in odom frame
+        # Get object position in odom frame (obj_R already computed above for mesh marker)
         obj_pos = np.array([
             pose_odom.pose.position.x,
             pose_odom.pose.position.y,
             pose_odom.pose.position.z
         ])
-        obj_quat = pose_odom.pose.orientation
-        obj_rot = Rotation.from_quat([obj_quat.x, obj_quat.y, obj_quat.z, obj_quat.w])
-        obj_R = obj_rot.as_matrix()
         
         # Axis directions in object frame (x, y, z axes)
         axis_dirs_obj = {

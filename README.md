@@ -9,7 +9,7 @@ This package provides 6D pose estimation for object manipulation using Foundatio
 ```bash
 # Setup SAM (includes YOLO for object detection)
 cd ~/hsr_robocanes_omniverse/src/final-project-OfficialBishal
-./scripts/setup_sam.sh
+./setup/setup_sam.sh
 
 # Verify FoundationPose is set up
 conda activate foundationpose
@@ -76,8 +76,10 @@ final-project-OfficialBishal/
 │   ├── foundationpose_pose_estimation_node.py
 │   ├── run_sam_segmentation.sh
 │   ├── run_foundationpose.sh
-│   ├── setup_sam.sh
 │   └── utilities/        # Utility scripts (not required for main pipeline)
+├── setup/                # Setup scripts (conda environments, dependencies)
+│   ├── setup_sam.sh
+│   └── setup_grounded_sam.sh
 ├── launch/               # ROS launch files
 │   └── foundationpose_with_sam.launch  # Main launch (loads config)
 ├── config/               # Configuration files

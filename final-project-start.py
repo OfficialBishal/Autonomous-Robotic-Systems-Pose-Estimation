@@ -2,6 +2,9 @@ import os
 import signal
 import subprocess
 import time
+import json
+import argparse
+import shlex
 
 from process_handler import process_handler
 
@@ -11,7 +14,7 @@ print(f"Package Path: {PACKAGE_PATH}")
 
 if 'error' in PACKAGE_PATH.lower():
     print(f'source and run program again!')
-    exit()
+    exit(1)
 
 LAUNCH_NAME = 'robocanes_hsr_correction_sim.launch'
 # Use launch file from hsr_isaac_localization package (same as assignment6)
@@ -19,7 +22,7 @@ HSR_ISAAC_LOCALIZATION_PKG = "hsr_isaac_localization"
 HSR_ISAAC_LOCALIZATION_PATH = subprocess.getoutput(f"rospack find {HSR_ISAAC_LOCALIZATION_PKG}")
 if 'error' in HSR_ISAAC_LOCALIZATION_PATH.lower():
     print(f'Could not find {HSR_ISAAC_LOCALIZATION_PKG} package')
-    exit()
+    exit(1)
 LAUNCH_PATH = os.path.join(HSR_ISAAC_LOCALIZATION_PATH, 'launch', LAUNCH_NAME)
 print(f'roslaunch path:', LAUNCH_PATH)
 
@@ -29,7 +32,7 @@ print(f"Isaac Sim path: {ISAAC_SIM_PATH}")
 
 if 'error' in ISAAC_SIM_PATH.lower():
     print(f'Could not find {ISAAC_SIM_NAME} package')
-    exit()
+    exit(1)
 
 ISAAC_SIM_PYTHON_NAME = 'python.sh'
 ISAAC_SIM_PYTHON_PATH = os.path.join(ISAAC_SIM_PATH, ISAAC_SIM_PYTHON_NAME)
@@ -46,15 +49,36 @@ RVIZ_NAME = 'hsr.rviz'
 RVIZ_PATH = os.path.join(PACKAGE_PATH, 'rviz', RVIZ_NAME)
 print(f'RVIZ path:', RVIZ_PATH)
 
-# Commands to start processes
-# No DEBUG
-# roslaunch_cmd = f"roslaunch {LAUNCH_PATH} > /dev/null 2>&1"
-# isaac_sim_cmd = f"{ISAAC_SIM_PYTHON_PATH} {ISAAC_WORLD_PATH} > /dev/null 2>&1"
-# rviz_cmd = f"rviz -d {RVIZ_PATH} > /dev/null 2>&1"
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description="Start Isaac Sim with final-project world")
+parser.add_argument("--headless", action="store_true", 
+                    help="Run Isaac Sim in headless mode (no GUI, saves GPU memory)")
+parser.add_argument("--width", type=int, default=1280, help="Window width (ignored in headless)")
+parser.add_argument("--height", type=int, default=720, help="Window height (ignored in headless)")
+parser.add_argument("--renderer", type=str, default="RayTracedLighting",
+                    choices=["RayTracedLighting", "PathTracing", "HydraStorm"],
+                    help="Renderer for Isaac Sim")
+args = parser.parse_args()
 
-# DEBUG
+# Build sim config (headless mode reduces GPU memory usage significantly)
+sim_config = {
+    "width": args.width,
+    "height": args.height,
+    "sync_loads": True,
+    "headless": args.headless,
+    "renderer": args.renderer,
+}
+sim_config_str = shlex.quote(json.dumps(sim_config))
+
+print(f"Isaac Sim config: {sim_config}")
+if args.headless:
+    print("=" * 60)
+    print("RUNNING IN HEADLESS MODE - No GUI, reduced GPU memory usage")
+    print("=" * 60)
+
+# Commands to start processes
 roslaunch_cmd = f"roslaunch {LAUNCH_PATH}"
-isaac_sim_cmd = f"{ISAAC_SIM_PYTHON_PATH} {ISAAC_WORLD_PATH}"
+isaac_sim_cmd = f"{ISAAC_SIM_PYTHON_PATH} {ISAAC_WORLD_PATH} --sim_app_config {sim_config_str}"
 rviz_cmd = f"rviz -d {RVIZ_PATH}"
 
 # Start processes

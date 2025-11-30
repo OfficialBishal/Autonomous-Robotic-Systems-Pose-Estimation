@@ -2,11 +2,27 @@
 # This file contains all parameters for FoundationPose pose estimation
 
 # ============================================================================
+# Object Configuration
+# ============================================================================
+# Object name used for:
+#   - Ground truth topic: /{object_name}/ground_truth_pose
+#   - Default mesh path: src/final-project-OfficialBishal/meshes/{object_name}.obj
+#   - Mask topic: /segmentation/{object_name}_mask
+# 
+# Available objects:
+#   - "mustard_bottle" (default)
+#   - "cracker_box" (or "craker_box" - note the typo in the filename)
+#   - Any other object name matching your mesh file
+object_name: "cracker_box"
+
+# ============================================================================
 # Mesh Configuration
 # ============================================================================
-# Path relative to workspace root: src/final-project-OfficialBishal/meshes/mustard.obj
-# Or use absolute path: /home/local/csc752/csc752/hsr_robocanes_omniverse/src/final-project-OfficialBishal/meshes/mustard.obj
-mesh_file: "src/final-project-OfficialBishal/meshes/mustard.obj"
+# Mesh files are organized in folders: meshes/{object_name}/mesh.obj
+# The node will automatically find: meshes/{object_name}/mesh.obj
+# Or you can specify a custom path (relative or absolute)
+# If empty, will use default based on object_name
+mesh_file: ""  # Leave empty to use default: meshes/{object_name}/mesh.obj
 
 # ============================================================================
 # Camera Topics (default for HSR robot in Isaac Sim)
@@ -27,21 +43,24 @@ object_frame_id: "object_pose"
 # ============================================================================
 foundationpose:
   # Number of refinement iterations for initial pose estimation
-  est_refine_iter: 5
+  # Reduced from 5 to 3 to save GPU memory
+  est_refine_iter: 3
   
   # Number of refinement iterations for tracking
   track_refine_iter: 2
   
   # Debug level (0=off, 1=basic, 2=detailed, 3=verbose)
-  debug: 1
+  # Reduced to 1 to save memory (debug=2 saves images which uses memory)
+  debug: 2
 
 # ============================================================================
 # Mask Parameters
 # ============================================================================
 mask:
   # Use object mask for segmentation (requires mask_topic)
+  # If empty, will use default based on object_name: /segmentation/{object_name}_mask
   use_mask: true
-  mask_topic: "/segmentation/mustard_mask"
+  mask_topic: ""  # Leave empty to use default: /segmentation/{object_name}_mask
 
 # ============================================================================
 # Depth Mask Parameters (for better object isolation)
@@ -53,46 +72,34 @@ depth_mask:
   depth_max: 2.0
 
 # ============================================================================
-# Orientation Correction Parameters
+# Coordinate Frame Correction
 # ============================================================================
-orientation_correction:
-  # Enable automatic orientation correction testing
-  # If enabled, will test all combinations of 90 and 180 degree rotations
-  # and select the one with the lowest error compared to ground truth
-  auto_orientation_correction: true
+# Apply a rotation to convert from FoundationPose/OpenCV convention to ROS convention
+# This fixes issues like objects appearing upside down in RViz
+coordinate_frame_correction:
+  # Enable coordinate frame correction
+  # Set to false if you want to disable it (position accuracy is more important than RViz orientation)
+  enabled: true
   
-  # Error threshold (degrees) - only test corrections if error exceeds this
-  auto_correction_error_threshold: 80.0
-  
-  # Manual correction: specify axis ('x', 'y', 'z') for 90-degree rotation
-  # Leave empty to disable manual correction
-  orientation_correction_90deg: ""
-
-# ============================================================================
-# Pose Stability Parameters (for automatic correction timing)
-# ============================================================================
-pose_stability:
-  # Number of recent poses to track for stability checking
-  pose_stability_history_size: 30
-  
-  # Position change threshold (meters) - pose is stable if std dev < this
-  pose_stability_threshold: 0.02
-  
-  # Orientation change threshold (degrees) - pose is stable if max change < this
-  pose_stability_orientation_threshold: 2.0
-  
-  # Minimum number of samples before checking stability
-  pose_stability_min_samples: 20
+  # Rotation angles in degrees (applied in ZYX Euler order)
+  # Common fixes:
+  #   - 180° around X-axis: [0, 0, 180] (flips Y and Z) - Use this to flip Z-axis
+  #   - 180° around Y-axis: [0, 180, 0] (flips X and Z)
+  #   - 180° around Z-axis: [180, 0, 0] (flips X and Y)
+  #   - Combination: [180, 0, 180] (try different combinations)
+  # NOTE: [180, 180, 180] is equivalent to identity (no rotation)!
+  # Flip Z-axis vertically: blue was down, make it up (180° around X-axis)
+  rotation_euler_zyx_degrees: [0, 0, 180]  # 180° around X-axis to flip Z-axis (blue up)
 
 # ============================================================================
 # Pose Publishing Quality Thresholds
 # ============================================================================
 publish_quality:
   # Only publish pose if position error is below this threshold (meters)
-  publish_position_error_threshold: 0.2
+  publish_position_error_threshold: 2 #0.2
   
   # Only publish pose if orientation error is below this threshold (degrees)
-  publish_orientation_error_threshold: 45.0
+  publish_orientation_error_threshold: 200 #45.0
 
 # ============================================================================
 # SAM Segmentation Parameters
@@ -134,14 +141,86 @@ object_detection:
   # Can be a path to a file or just the model name (will download automatically)
   yolo_model_path: "yolov8n.pt"
   
-  # Class name to detect (e.g., 'bottle', 'mustard', 'cup')
-  target_class_name: "bottle"
+  # Class name to detect (e.g., 'bottle', 'book', 'cup')
+  # Note: YOLO COCO dataset doesn't have 'box' class
+  # For cracker_box, the code will try 'bottle' and 'book' automatically
+  # For mustard_bottle, use 'bottle'
+  target_class_name: "bottle"  # Will be mapped to appropriate classes based on object_name
   
   # Class ID to detect (-1 means use class name instead)
   target_class_id: -1
   
   # YOLO confidence threshold (0.0 to 1.0)
-  detection_confidence: 0.25
+  # Lower values detect more objects but may include false positives
+  detection_confidence: 0.15  # Lowered from 0.25 to detect cracker box better
   
   # YOLO IoU threshold for non-maximum suppression (0.0 to 1.0)
   detection_iou: 0.45
+
+# ============================================================================
+# Grounded SAM Parameters (Alternative to YOLO + SAM)
+# ============================================================================
+grounded_sam:
+  # Grounding DINO checkpoint path
+  # Default: ~/hsr_robocanes_omniverse/Grounded-Segment-Anything/checkpoints/groundingdino_swint_ogc.pth
+  groundingdino_checkpoint: "~/hsr_robocanes_omniverse/Grounded-Segment-Anything/checkpoints/groundingdino_swint_ogc.pth"
+  
+  # Grounding DINO config file path
+  # Default: ~/hsr_robocanes_omniverse/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py
+  groundingdino_config: "~/hsr_robocanes_omniverse/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+  
+  # Text prompt for object detection (e.g., "cracker box", "bottle", "mustard bottle")
+  # If empty, will auto-generate from object_name (e.g., "cracker_box" -> "cracker box")
+  text_prompt: ""  # Leave empty to auto-generate from object_name
+  
+  # Detection thresholds
+  box_threshold: 0.3      # Box confidence threshold (0.0 to 1.0)
+  text_threshold: 0.25    # Text confidence threshold (0.0 to 1.0)
+  iou_threshold: 0.5      # IoU threshold for NMS (0.0 to 1.0)
+
+# ============================================================================
+# Pick and Place Parameters
+# ============================================================================
+pick:
+  # Pose topic from FoundationPose node
+  pose_topic: "/foundationpose_pose_estimation/pose"
+  
+  # Planning frame for MoveIt (usually 'base_link' or 'odom')
+  planning_frame: "base_link"
+  
+  # Approach and grasp parameters (in meters)
+  approach_height: 0.15  # Height above object TOP SURFACE for approach pose (not center)
+  grasp_height_offset: 0.02  # Offset from object TOP SURFACE for grasp (positive = above top)
+  lift_height: 0.20  # Height to lift object after grasping
+  
+  # Object dimensions (for calculating top surface position from center pose)
+  # These should match the actual object dimensions in meters
+  # For cracker_box: approximately [0.164, 0.213, 0.072] meters (from YCB dataset)
+  object_dimensions: [0.164, 0.213, 0.072]  # [width, depth, height] in meters (X, Y, Z)
+  
+  pre_grasp_distance: 0.10  # Distance before final grasp (not currently used)
+  
+  # Gripper positions (0.0 = closed, 1.0 = open)
+  gripper_open_position: 1.0
+  gripper_close_position: 0.0
+  
+  # Motion planning parameters
+  planning_timeout: 120.0  # seconds (increased for complex planning)
+  execution_timeout: 120.0  # seconds (increased for slower execution)
+  velocity_scaling: 0.3  # Slower for safety (0.0 to 1.0)
+  acceleration_scaling: 0.3  # Slower for safety (0.0 to 1.0)
+  
+  # Pose consistency checking
+  pose_buffer_size: 1  # Number of poses to buffer before picking
+  pose_consistency_threshold: 0.05  # Maximum position difference (m) for poses to be considered consistent
+  
+  # End effector orientation for top-down grasp [roll, pitch, yaw] in radians
+  # Default: [0, π, 0] = gripper pointing straight down
+  end_effector_orientation: [0.0, 3.14159, 0.0]
+  
+  # Place position [x, y, z] in planning frame (empty list [] = just lift, don't place)
+  place_position: []  # Example: [0.5, 0.0, 0.3]
+  
+  # Auto-trigger pick when pose is received (if false, use ~trigger_pick topic)
+  # Set to true to automatically start picking when a pose is received
+  auto_pick: true

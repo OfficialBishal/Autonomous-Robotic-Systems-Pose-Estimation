@@ -74,11 +74,19 @@ class SAMSegmentationNode:
     
     def _load_parameters(self):
         """Load ROS parameters from config file (organized structure)."""
+        # Object name parameter (used for default mask topic and class mapping)
+        self.object_name = rospy.get_param('~object_name', 'mustard_bottle')
+        rospy.loginfo(f"Object name: {self.object_name}")
+        
         # Topic parameters (from config file nested structure, with fallbacks)
         self.rgb_topic = rospy.get_param('~camera/rgb_topic', 
                                         rospy.get_param('~rgb_topic', '/hsrb/head_rgbd_sensor/rgb/image_rect_color'))
         self.mask_topic = rospy.get_param('~mask/mask_topic',
-                                         rospy.get_param('~mask_topic', '/segmentation/mustard_mask'))
+                                         rospy.get_param('~mask_topic', ''))
+        # If mask_topic is empty, use default based on object_name
+        if not self.mask_topic:
+            self.mask_topic = f'/segmentation/{self.object_name}_mask'
+            rospy.loginfo(f"No mask_topic specified, using default: {self.mask_topic}")
         self.frame_id = rospy.get_param('~camera/frame_id',
                                        rospy.get_param('~frame_id', 'head_rgbd_sensor_rgb_frame'))
         
@@ -437,6 +445,34 @@ class SAMSegmentationNode:
             rospy.logwarn_throttle(5.0, "No bounding boxes detected")
             return None
         
+        # Debug: Log all detected classes
+        detected_classes = {}
+        for box in result.boxes:
+            class_id = int(box.cls[0].item())
+            class_name = self.detection_model.names[class_id]
+            confidence = float(box.conf[0].item())
+            if class_name not in detected_classes or confidence > detected_classes[class_name]:
+                detected_classes[class_name] = confidence
+        
+        if detected_classes:
+            rospy.loginfo_throttle(5.0, f"YOLO detected classes: {detected_classes}")
+        
+        # Map object names to YOLO class names (COCO dataset classes)
+        # COCO doesn't have "box", so we use alternative classes
+        class_name_map = {
+            'cracker_box': ['bottle', 'book'],  # Cracker box might be detected as bottle or book
+            'box': ['bottle', 'book'],
+            'mustard_bottle': ['bottle'],
+            'bottle': ['bottle'],
+        }
+        
+        # Get list of acceptable class names for this object
+        acceptable_classes = class_name_map.get(self.object_name, [self.target_class_name])
+        if self.target_class_name not in acceptable_classes:
+            acceptable_classes.append(self.target_class_name)
+        
+        rospy.loginfo_throttle(10.0, f"Looking for object '{self.object_name}' using classes: {acceptable_classes}")
+        
         # Find target object by class name or ID
         target_box = None
         best_confidence = 0.0
@@ -452,8 +488,11 @@ class SAMSegmentationNode:
             if self.target_class_id >= 0:
                 is_target = (class_id == self.target_class_id)
             else:
-                # Match by class name (case-insensitive, partial match)
-                is_target = (self.target_class_name.lower() in class_name.lower())
+                # Match by class name - check against acceptable classes
+                for acceptable_class in acceptable_classes:
+                    if acceptable_class.lower() in class_name.lower() or class_name.lower() in acceptable_class.lower():
+                        is_target = True
+                        break
             
             if is_target and confidence > best_confidence:
                 # Get bounding box coordinates
@@ -462,7 +501,7 @@ class SAMSegmentationNode:
                 best_confidence = confidence
         
         if target_box is None:
-            rospy.logwarn_throttle(5.0, f"Target object '{self.target_class_name}' not detected")
+            rospy.logwarn_throttle(5.0, f"Target object '{self.object_name}' not detected. Detected classes: {list(detected_classes.keys())}")
             return None
         
         rospy.loginfo_throttle(5.0, 

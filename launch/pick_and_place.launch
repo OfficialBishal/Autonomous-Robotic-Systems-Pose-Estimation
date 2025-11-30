@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Pick and Place Node -->
+  <!-- This node subscribes to pose estimates and executes pick operations -->
+  <!-- Runs in system ROS environment (not conda) to avoid libffi conflicts with MoveIt -->
+  <!-- 
+    Usage: Run this launch file separately after foundationpose_with_sam.launch is running
+    The pick node will subscribe to /foundationpose_pose_estimation/pose topic
+  -->
+  <node name="pick_and_place" 
+        pkg="final-project-OfficialBishal" 
+        type="run_pick_and_place.sh" 
+        output="screen">
+    <!-- Load config file into this node's namespace -->
+    <rosparam file="$(find final-project-OfficialBishal)/config/foundationpose_config.yaml" command="load" />
+  </node>
+</launch>
+

@@ -85,6 +85,14 @@ fi
 # 2. FoundationPose directory (for estimater, etc.)
 export PYTHONPATH="/opt/ros/noetic/lib/python3/dist-packages:$HOME/hsr_robocanes_omniverse/src/FoundationPose:$PYTHONPATH"
 
+# CUDA Memory Management
+# Set PyTorch CUDA memory allocation config to reduce fragmentation
+# max_split_size_mb: Maximum size of a memory chunk that can be split (in MB)
+# Lower values reduce fragmentation but may slow down allocation
+# Note: expandable_segments and roundup_power2_divisions are not available in older PyTorch versions
+# Using only max_split_size_mb which is supported in PyTorch 1.x
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:32
+
 # Debug: Print environment variables to verify they're set
 # Always print these when running under roslaunch to help debug
 if [ "${DEBUG_FOUNDATIONPOSE:-0}" = "1" ] || [ -n "$ROS_MASTER_URI" ]; then
@@ -93,6 +101,7 @@ if [ "${DEBUG_FOUNDATIONPOSE:-0}" = "1" ] || [ -n "$ROS_MASTER_URI" ]; then
     echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
     echo "LD_PRELOAD: $LD_PRELOAD"
     echo "PYTHONPATH: $PYTHONPATH"
+    echo "PYTORCH_CUDA_ALLOC_CONF: $PYTORCH_CUDA_ALLOC_CONF"
     # Verify libffi resolution
     if [ -f "$CONDA_PREFIX/lib/libffi.so.7" ]; then
         echo "Testing libffi resolution..."

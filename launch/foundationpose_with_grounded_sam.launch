@@ -1,23 +1,23 @@
 <?xml version="1.0"?>
 <launch>
   <!-- Load configuration file into each node's namespace -->
-  <!-- Config file contains all parameters for both SAM and FoundationPose nodes -->
+  <!-- Config file contains all parameters for both Grounded SAM and FoundationPose nodes -->
   
-  <!-- SAM Segmentation Node -->
-  <!-- This node runs in the 'sam' conda environment -->
-  <node name="sam_segmentation" 
+  <!-- Grounded SAM Segmentation Node -->
+  <!-- This node runs in the 'grounded_sam' conda environment -->
+  <node name="grounded_sam_segmentation" 
         pkg="final-project-OfficialBishal" 
-        type="run_sam_segmentation.sh" 
+        type="run_grounded_sam_segmentation.sh" 
         output="screen">
     <!-- Load config file into this node's namespace -->
     <rosparam file="$(find final-project-OfficialBishal)/config/foundationpose_config.yaml" command="load" />
-    <!-- Set environment to use sam conda environment -->
-    <env name="CONDA_DEFAULT_ENV" value="sam" />
+    <!-- Set environment to use grounded_sam conda environment -->
+    <env name="CONDA_DEFAULT_ENV" value="grounded_sam" />
   </node>
   
   <!-- FoundationPose Pose Estimation node -->
   <!-- This node runs in the 'foundationpose' conda environment -->
-  <!-- It subscribes to the mask topic from SAM -->
+  <!-- It subscribes to the mask topic from Grounded SAM -->
   <node name="foundationpose_pose_estimation" 
         pkg="final-project-OfficialBishal" 
         type="run_foundationpose.sh" 
@@ -34,3 +34,4 @@
   <!-- Note: Pick and Place node is launched separately via pick_and_place.launch -->
   <!-- Run: roslaunch final-project-OfficialBishal pick_and_place.launch -->
 </launch>
+
