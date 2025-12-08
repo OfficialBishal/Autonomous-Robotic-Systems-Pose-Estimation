@@ -61,7 +61,7 @@ parser = argparse.ArgumentParser(description="Final Project World Setup")
 parser.add_argument(
     "--robot_spawn_pos_xyz", 
     type=str, 
-    default='[3, 3.35, 0.01]', 
+    default='[3, 2.5, 0.01]', 
     # default='[3, 3.35, 0.01]', 
     help="Robot spawn position as xyz list."
 )
@@ -78,15 +78,17 @@ TABLE_POSITION = [3, 4]  # Grid coordinates (x, y)
 TABLE_HEIGHT = 0.1  # Table base height in meters
 OBJECT_HEIGHT_ABOVE_TABLE = 0.5  # Object height above table (when upright)
 OBJECT_LYING_HEIGHT = 0.05  # Height when lying flat
-HEAD_TILT_ANGLE = -0.8  # Head tilt angle in radians (negative = down)
+# HEAD_TILT_ANGLE = -0.8  # Head tilt angle in radians (negative = down)
+HEAD_TILT_ANGLE = -0.4  # Head tilt angle in radians (negative = down)
+
 ARM_ROLL_JOINT_ANGLE = -1.57  # Arm roll joint angle in radians
 WRIST_FLEX_JOINT_ANGLE = -1.57  # Wrist flex joint angle in radians
 
 # Object configuration
 OBJECT_NAME = "cracker_box"  # Primary object for pose estimation
 ADDITIONAL_OBJECTS = [
-    # {"name": "mustard_bottle", "grid_x": 2.85, "grid_y": 3.85, 
-    #  "orientation": [0, 0, 0], "lying": False}
+    {"name": "mustard_bottle", "grid_x": 2.85, "grid_y": 3.85, 
+     "orientation": [0, 0, 0], "lying": False}
 ]
 
 # ============================================================================

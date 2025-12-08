@@ -10,8 +10,9 @@ import rospy
 import moveit_commander
 import tf2_ros
 import tf2_geometry_msgs
-from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import String, Bool
+from geometry_msgs.msg import PoseStamped, Point
+from std_msgs.msg import String, Bool, ColorRGBA
+from visualization_msgs.msg import Marker, MarkerArray
 from tf.transformations import quaternion_from_euler, euler_from_quaternion
 import numpy as np
 import math
@@ -41,6 +42,7 @@ class PickAndPlaceNode:
         self.end_effector_orientation = rospy.get_param('~pick/end_effector_orientation', [0.0, math.pi, 0.0])
         self.auto_pick = rospy.get_param('~pick/auto_pick', True)
         self.planning_timeout = rospy.get_param('~pick/planning_timeout', 20.0)
+        self.test_joints_on_init = rospy.get_param('~pick/test_joints_on_init', True)
         
         # Object dimensions for calculating top surface position
         # Format: [width, depth, height] in meters (X, Y, Z in object frame)
@@ -57,6 +59,10 @@ class PickAndPlaceNode:
         self.arm.set_max_acceleration_scaling_factor(0.3)
         self.arm.set_planning_time(self.planning_timeout)
         self.arm.set_num_planning_attempts(10)  # Try multiple times
+        
+        # Initialize robot state for IK checking
+        self.robot = moveit_commander.RobotCommander()
+        self.scene = moveit_commander.PlanningSceneInterface()
         
         # Set planner - RRTConnect is usually fastest and most reliable
         # Other options: 'RRT', 'PRM', 'RRTstar', 'TRRT', 'EST', 'SBL'
@@ -77,17 +83,44 @@ class PickAndPlaceNode:
         # Verify we can get current state
         try:
             current_joint_values = self.arm.get_current_joint_values()
+            joint_names = self.arm.get_active_joints()
             current_pose = self.arm.get_current_pose().pose
-            rospy.loginfo(f">>> [MOVEIT] Robot state synchronized. Current joint values: {[f'{v:.3f}' for v in current_joint_values]}")
+            rospy.loginfo(f">>> [MOVEIT] Robot state synchronized. Active joints: {joint_names}")
+            rospy.loginfo(f">>> [MOVEIT] Current joint values: {dict(zip(joint_names, [f'{v:.3f}' for v in current_joint_values]))}")
             rospy.loginfo(f">>> [MOVEIT] Current end-effector pose: ({current_pose.position.x:.3f}, {current_pose.position.y:.3f}, {current_pose.position.z:.3f})")
+            
+            # Check if arm_lift_joint is in the active joints
+            if 'arm_lift_joint' in joint_names:
+                lift_idx = joint_names.index('arm_lift_joint')
+                rospy.loginfo(f">>> [MOVEIT] arm_lift_joint value: {current_joint_values[lift_idx]:.3f} m (prismatic joint for vertical lift)")
+            else:
+                rospy.logwarn(">>> [MOVEIT] WARNING: arm_lift_joint not found in active joints!")
         except Exception as e:
             rospy.logwarn(f">>> [MOVEIT] Could not get initial robot state: {e}")
             rospy.logwarn(">>> [MOVEIT] This is OK if robot hasn't started publishing joint_states yet")
+        
+        # TEST: Verify all joints can move by testing each one (optional)
+        if self.test_joints_on_init:
+            rospy.loginfo("="*70)
+            rospy.loginfo(">>> [INIT_TEST] Testing joint movement capability...")
+            rospy.loginfo("="*70)
+            self._test_joint_movement()
+            rospy.loginfo("="*70)
+            rospy.loginfo(">>> [INIT_TEST] Joint movement test complete")
+            rospy.loginfo("="*70)
+        else:
+            rospy.loginfo(">>> [INIT_TEST] Joint movement test disabled (set ~pick/test_joints_on_init to True to enable)")
         
         # Setup ROS communication
         self.pose_sub = rospy.Subscriber(self.pose_topic, PoseStamped, self.pose_callback, queue_size=1)
         self.status_pub = rospy.Publisher('~status', String, queue_size=10, latch=True)
         self.pick_complete_pub = rospy.Publisher('~pick_complete', Bool, queue_size=10, latch=True)
+        
+        # Visualization markers
+        self.target_pose_marker_pub = rospy.Publisher('~target_pose_marker', Marker, queue_size=10, latch=True)
+        self.end_effector_marker_pub = rospy.Publisher('~end_effector_marker', Marker, queue_size=10, latch=True)
+        self.path_marker_pub = rospy.Publisher('~path_marker', Marker, queue_size=10, latch=True)
+        self.marker_id_counter = 0
         
         if not self.auto_pick:
             self.trigger_sub = rospy.Subscriber('~trigger_pick', Bool, self.trigger_pick_callback, queue_size=1)
@@ -107,6 +140,108 @@ class PickAndPlaceNode:
         rospy.loginfo(f"Subscribing to: {self.pose_topic}")
         rospy.loginfo(f"Auto-pick: {self.auto_pick}")
         rospy.loginfo(f"Pose buffer size: {self.pose_buffer_size}, consistency threshold: {self.pose_consistency_threshold}m")
+    
+    def _test_joint_movement(self):
+        """Test that all joints can actually move by moving each one slightly."""
+        try:
+            joint_names = self.arm.get_active_joints()
+            current_joint_values = self.arm.get_current_joint_values()
+            initial_values = dict(zip(joint_names, current_joint_values))
+            
+            rospy.loginfo(f">>> [INIT_TEST] Starting joint movement test with {len(joint_names)} joints")
+            rospy.loginfo(f">>> [INIT_TEST] Initial joint values: {dict(zip(joint_names, [f'{v:.3f}' for v in current_joint_values]))}")
+            
+            # Test each joint with a small movement
+            test_results = {}
+            for i, joint_name in enumerate(joint_names):
+                rospy.loginfo(f">>> [INIT_TEST] Testing joint {i+1}/{len(joint_names)}: {joint_name}")
+                try:
+                    initial_value = current_joint_values[i]
+                    
+                    # Calculate a small test movement (different for each joint type)
+                    if joint_name == 'arm_lift_joint':
+                        # Prismatic joint: move 0.05m
+                        test_value = min(0.69, initial_value + 0.05)
+                        if test_value == initial_value:
+                            test_value = min(0.69, 0.1)  # If at 0, move to 0.1
+                    elif 'flex' in joint_name or 'roll' in joint_name:
+                        # Revolute joints: move 0.1 rad (~6 degrees)
+                        test_value = initial_value + 0.1
+                    else:
+                        # Other joints: small movement
+                        test_value = initial_value + 0.05
+                    
+                    # Set target for this joint only
+                    joint_target = dict(zip(joint_names, current_joint_values))
+                    joint_target[joint_name] = test_value
+                    
+                    rospy.loginfo(f">>> [INIT_TEST]   Moving {joint_name} from {initial_value:.3f} to {test_value:.3f}")
+                    self.arm.set_joint_value_target(joint_target)
+                    self.arm.set_planning_time(5.0)  # Short timeout for test
+                    
+                    # Try to move
+                    success = self.arm.go(wait=True)
+                    
+                    if success:
+                        # Check if it actually moved
+                        new_values = self.arm.get_current_joint_values()
+                        new_value = new_values[i]
+                        moved = abs(new_value - initial_value) > 0.01  # At least 1cm or 0.01 rad
+                        
+                        if moved:
+                            rospy.loginfo(f">>> [INIT_TEST]   ✓ {joint_name} MOVED: {initial_value:.3f} -> {new_value:.3f}")
+                            test_results[joint_name] = True
+                        else:
+                            rospy.logwarn(f">>> [INIT_TEST]   ✗ {joint_name} did not move (stayed at {new_value:.3f})")
+                            test_results[joint_name] = False
+                        
+                        # Update current values for next test
+                        current_joint_values = new_values
+                    else:
+                        rospy.logwarn(f">>> [INIT_TEST]   ✗ {joint_name} movement FAILED (go() returned False)")
+                        test_results[joint_name] = False
+                    
+                    rospy.sleep(0.5)  # Brief pause between tests
+                    
+                except Exception as e:
+                    rospy.logerr(f">>> [INIT_TEST]   ✗ {joint_name} test ERROR: {e}")
+                    test_results[joint_name] = False
+                    import traceback
+                    rospy.logerr(traceback.format_exc())
+            
+            # Summary
+            rospy.loginfo(">>> [INIT_TEST] Test Summary:")
+            all_passed = True
+            for joint_name, passed in test_results.items():
+                status = "✓ PASS" if passed else "✗ FAIL"
+                rospy.loginfo(f">>> [INIT_TEST]   {joint_name}: {status}")
+                if not passed:
+                    all_passed = False
+            
+            if all_passed:
+                rospy.loginfo(">>> [INIT_TEST] ✓ All joints can move!")
+            else:
+                rospy.logwarn(">>> [INIT_TEST] ✗ Some joints failed to move - this may cause planning issues")
+            
+            # Move back to initial position (or 'go' position)
+            rospy.loginfo(">>> [INIT_TEST] Moving arm back to 'go' position...")
+            try:
+                self.arm.set_named_target('go')
+                self.arm.set_planning_time(10.0)
+                success = self.arm.go(wait=True)
+                if success:
+                    rospy.loginfo(">>> [INIT_TEST] ✓ Arm returned to 'go' position")
+                else:
+                    rospy.logwarn(">>> [INIT_TEST] ✗ Failed to return to 'go' position")
+            except Exception as e:
+                rospy.logwarn(f">>> [INIT_TEST] ✗ Error returning to 'go' position: {e}")
+            
+            rospy.sleep(1.0)  # Final pause
+            
+        except Exception as e:
+            rospy.logerr(f">>> [INIT_TEST] Joint movement test failed: {e}")
+            import traceback
+            rospy.logerr(traceback.format_exc())
     
     def pose_callback(self, msg):
         """Callback for object pose updates."""
@@ -142,6 +277,9 @@ class PickAndPlaceNode:
                             f"{self.target_pose.pose.position.y:.3f}, {self.target_pose.pose.position.z:.3f})")
                 rospy.loginfo(">>> [POSE_BUFFER] STOPPING pose buffer updates - locked in this pose")
                 rospy.loginfo("="*60)
+                
+                # Publish target pose marker
+                self._publish_target_pose_marker(self.target_pose, color=(1.0, 0.0, 0.0, 1.0), scale=0.15)
                 
                 if self.auto_pick and self.current_state == self.STATE_IDLE:
                     rospy.loginfo(">>> [AUTO_PICK] Triggering pick operation with consistent pose")
@@ -258,21 +396,52 @@ class PickAndPlaceNode:
             
             try:
                 rospy.loginfo(">>> [PREPARE] Step 2: Moving arm to 'go' position...")
+                # Get state before movement
+                before_joint_values = self.arm.get_current_joint_values()
+                before_pose = self.arm.get_current_pose().pose
+                joint_names = self.arm.get_active_joints()
+                rospy.loginfo(f">>> [PREPARE]   Before movement - Joint values: {dict(zip(joint_names, [f'{v:.3f}' for v in before_joint_values]))}")
+                rospy.loginfo(f">>> [PREPARE]   Before movement - Pose: ({before_pose.position.x:.3f}, {before_pose.position.y:.3f}, {before_pose.position.z:.3f})")
+                
                 # Small delay to ensure state is synchronized after gripper action
                 rospy.sleep(0.2)
                 self.arm.set_named_target('go')
+                self.arm.set_planning_time(10.0)  # Give it time to plan
+                rospy.loginfo(">>> [PREPARE]   Executing movement to 'go' position...")
                 success = self.arm.go(wait=True)
+                
                 if success:
                     rospy.loginfo(">>> [PREPARE] Step 2 complete: Arm moved to 'go' position")
-                    # Verify final state
+                    # Verify final state and check if it actually moved
                     final_joint_values = self.arm.get_current_joint_values()
                     final_pose = self.arm.get_current_pose().pose
-                    rospy.loginfo(f">>> [PREPARE]   Final state - Joint values: {[f'{v:.3f}' for v in final_joint_values]}")
-                    rospy.loginfo(f">>> [PREPARE]   Final pose: ({final_pose.position.x:.3f}, {final_pose.position.y:.3f}, {final_pose.position.z:.3f})")
+                    rospy.loginfo(f">>> [PREPARE]   After movement - Joint values: {dict(zip(joint_names, [f'{v:.3f}' for v in final_joint_values]))}")
+                    rospy.loginfo(f">>> [PREPARE]   After movement - Pose: ({final_pose.position.x:.3f}, {final_pose.position.y:.3f}, {final_pose.position.z:.3f})")
+                    
+                    # Check if joints actually moved
+                    joint_moved = False
+                    for i, joint_name in enumerate(joint_names):
+                        if abs(final_joint_values[i] - before_joint_values[i]) > 0.01:
+                            joint_moved = True
+                            rospy.loginfo(f">>> [PREPARE]   ✓ {joint_name} moved: {before_joint_values[i]:.3f} -> {final_joint_values[i]:.3f}")
+                    
+                    if not joint_moved:
+                        rospy.logwarn(">>> [PREPARE]   WARNING: No joints moved! This suggests the arm may not be responding to commands.")
+                    
+                    # Check if pose changed
+                    pose_moved = (abs(final_pose.position.x - before_pose.position.x) > 0.01 or
+                                 abs(final_pose.position.y - before_pose.position.y) > 0.01 or
+                                 abs(final_pose.position.z - before_pose.position.z) > 0.01)
+                    if pose_moved:
+                        rospy.loginfo(f">>> [PREPARE]   ✓ End-effector moved: ({before_pose.position.x:.3f}, {before_pose.position.y:.3f}, {before_pose.position.z:.3f}) -> ({final_pose.position.x:.3f}, {final_pose.position.y:.3f}, {final_pose.position.z:.3f})")
+                    else:
+                        rospy.logwarn(">>> [PREPARE]   WARNING: End-effector did not move!")
                 else:
-                    rospy.logwarn(">>> [PREPARE] Step 2 warning: Failed to move to 'go' position, continuing anyway")
+                    rospy.logwarn(">>> [PREPARE] Step 2 warning: Failed to move to 'go' position (go() returned False), continuing anyway")
             except Exception as e:
                 rospy.logwarn(f">>> [PREPARE] Step 2 warning: Could not move to 'go' position ({e}), continuing anyway")
+                import traceback
+                rospy.logwarn(traceback.format_exc())
             
             rospy.loginfo(">>> [PREPARE] *** PREPARATION COMPLETE ***")
             return True
@@ -342,6 +511,9 @@ class PickAndPlaceNode:
             rospy.loginfo(f">>> [APPROACH] Step 2 complete: Approach pose calculated")
             rospy.loginfo(f">>> [APPROACH]   Approach position: ({approach_pose.position.x:.3f}, {approach_pose.position.y:.3f}, {approach_pose.position.z:.3f})")
             
+            # Store approach Z for later use in pre-planning
+            approach_z = approach_pose.position.z
+            
             # Transform to odom for MoveIt
             rospy.loginfo(">>> [APPROACH] Step 3: Transforming approach pose to odom frame...")
             approach_pose_odom = self._transform_pose_to_odom(approach_pose, 'base_link')
@@ -370,6 +542,7 @@ class PickAndPlaceNode:
             rospy.loginfo(f">>> [PLAN_DETAILS]   Approach height offset: {self.approach_height:.3f}m above object center")
             rospy.loginfo("="*70)
             
+            # Set pose target
             self.arm.set_pose_target(approach_pose_odom.pose)
             
             # Relax orientation constraints for approach - allow more flexibility
@@ -377,16 +550,42 @@ class PickAndPlaceNode:
             self.arm.set_goal_orientation_tolerance(0.5)  # Allow ~29 degrees tolerance (increased from 0.2)
             self.arm.set_goal_position_tolerance(0.05)  # Allow 5cm position tolerance (increased from 0.02)
             
-            rospy.loginfo(f">>> [APPROACH]   Planning timeout: {self.planning_timeout}s")
-            rospy.loginfo(">>> [APPROACH]   Orientation tolerance: 0.2 rad (~11 deg), Position tolerance: 0.02m")
+            # CRITICAL: Ensure planning timeout is actually set and respected
+            # MoveIt sometimes has issues with timeout, so we'll set it multiple times
+            self.arm.set_planning_time(self.planning_timeout)
+            actual_timeout = self.arm.get_planning_time()
+            rospy.loginfo(f">>> [APPROACH]   Planning timeout: {self.planning_timeout}s (actual: {actual_timeout}s)")
+            rospy.loginfo(f">>> [APPROACH]   Orientation tolerance: 0.5 rad (~29 deg), Position tolerance: 0.05m")
+            
+            # Also set workspace bounds if needed - sometimes MoveIt needs explicit bounds
+            try:
+                # Get current workspace bounds
+                workspace = self.arm.get_workspace()
+                rospy.loginfo(f">>> [APPROACH]   Workspace bounds: {workspace}")
+            except:
+                pass  # Workspace bounds might not be available
             
             # Get current arm position before planning
             current_pose_before = self.arm.get_current_pose().pose
             rospy.loginfo(f">>> [APPROACH]   Current arm position BEFORE: ({current_pose_before.position.x:.3f}, {current_pose_before.position.y:.3f}, {current_pose_before.position.z:.3f})")
             
-            # Get current joint values
+            # Get current joint values with names
             current_joint_values = self.arm.get_current_joint_values()
-            rospy.loginfo(f">>> [APPROACH]   Current joint values: {[f'{v:.3f}' for v in current_joint_values]}")
+            joint_names = self.arm.get_active_joints()
+            joint_dict = dict(zip(joint_names, [f'{v:.3f}' for v in current_joint_values]))
+            rospy.loginfo(f">>> [APPROACH]   Current joint values: {joint_dict}")
+            
+            # Specifically log arm_lift_joint if available
+            if 'arm_lift_joint' in joint_names:
+                lift_idx = joint_names.index('arm_lift_joint')
+                rospy.loginfo(f">>> [APPROACH]   arm_lift_joint (vertical lift): {current_joint_values[lift_idx]:.3f} m")
+            
+            # Publish current end effector marker
+            current_pose_before_stamped = PoseStamped()
+            current_pose_before_stamped.header.frame_id = 'odom'
+            current_pose_before_stamped.header.stamp = rospy.Time.now()
+            current_pose_before_stamped.pose = current_pose_before
+            self._publish_end_effector_marker(current_pose_before_stamped, color=(1.0, 1.0, 0.0, 1.0), scale=0.06)
             
             # Try multiple planning strategies for better success rate
             plan_success = False
@@ -394,8 +593,55 @@ class PickAndPlaceNode:
             planning_time = None
             error_code = None
             
+            # Ensure planning timeout is set before Strategy 1
+            # CRITICAL: MoveIt sometimes ignores set_planning_time, so we set it multiple times
+            self.arm.set_planning_time(self.planning_timeout)
+            rospy.sleep(0.1)  # Brief pause to ensure timeout is set
+            self.arm.set_planning_time(self.planning_timeout)  # Set again to be sure
+            actual_timeout = self.arm.get_planning_time()
+            if abs(actual_timeout - self.planning_timeout) > 0.1:
+                rospy.logwarn(f">>> [APPROACH]   WARNING: Planning timeout mismatch! Requested: {self.planning_timeout}s, Actual: {actual_timeout}s")
+                # Force it again
+                self.arm.set_planning_time(self.planning_timeout)
+            
+            # Pre-planning: Try to set arm_lift_joint to a reasonable value for top-down picking
+            # Use a simpler, more direct approach - just set the joint value directly
+            joint_names = self.arm.get_active_joints()
+            if 'arm_lift_joint' in joint_names:
+                current_joint_values = self.arm.get_current_joint_values()
+                lift_idx = joint_names.index('arm_lift_joint')
+                current_lift = current_joint_values[lift_idx]
+                
+                # For top-down picking, we want arm_lift_joint to be at least 0.3m (mid-range)
+                # This gives good vertical clearance while maintaining reach
+                target_lift = max(0.3, min(0.5, approach_z - 0.2))  # Adjust based on target Z
+                target_lift = min(0.69, target_lift)  # Respect upper limit
+                
+                if abs(current_lift - target_lift) > 0.05:  # If more than 5cm difference
+                    rospy.loginfo(f">>> [APPROACH]   Pre-setting arm_lift_joint: {current_lift:.3f}m -> {target_lift:.3f}m")
+                    try:
+                        # Use a simpler approach: set only arm_lift_joint and use go() with shorter timeout
+                        self.arm.set_joint_value_target({'arm_lift_joint': target_lift})
+                        # Use a shorter timeout for this simple joint movement
+                        original_timeout = self.arm.get_planning_time()
+                        self.arm.set_planning_time(5.0)  # 5 seconds should be enough for single joint
+                        rospy.loginfo(">>> [APPROACH]   Adjusting arm_lift_joint before approach planning...")
+                        success = self.arm.go(wait=True)
+                        self.arm.set_planning_time(original_timeout)  # Restore original timeout
+                        if success:
+                            rospy.sleep(0.5)  # Brief pause for state update
+                            rospy.loginfo(">>> [APPROACH]   arm_lift_joint adjusted successfully")
+                        else:
+                            rospy.logwarn(">>> [APPROACH]   Could not adjust arm_lift_joint, continuing with current value")
+                    except Exception as e:
+                        rospy.logwarn(f">>> [APPROACH]   Failed to pre-set arm_lift_joint: {e}")
+                        # Continue anyway - MoveIt should still work
+            
             # Strategy 1: Try direct pose planning with current planner
             rospy.loginfo(">>> [APPROACH]   Strategy 1: Direct pose planning with RRTConnect...")
+            # Ensure timeout is set right before planning
+            self.arm.set_planning_time(self.planning_timeout)
+            rospy.loginfo(f">>> [APPROACH]   Planning timeout before Strategy 1: {self.arm.get_planning_time()}s")
             plan_result = self.arm.plan()
             if len(plan_result) >= 2:
                 plan_success, trajectory, planning_time, error_code = plan_result[0], plan_result[1], plan_result[2] if len(plan_result) > 2 else None, plan_result[3] if len(plan_result) > 3 else None
@@ -410,9 +656,9 @@ class PickAndPlaceNode:
                 rospy.logwarn(">>> [APPROACH]   Strategy 1 failed, trying Strategy 2: Cartesian path planning...")
                 try:
                     # Compute Cartesian path (straight line motion)
-                    # Correct signature: compute_cartesian_path(waypoints, eef_step, jump_threshold, avoid_collisions)
+                    # Correct signature: compute_cartesian_path(waypoints, eef_step, avoid_collisions)
                     waypoints = [approach_pose_odom.pose]
-                    (plan_cartesian, fraction) = self.arm.compute_cartesian_path(waypoints, 0.01, 0.0, False)
+                    (plan_cartesian, fraction) = self.arm.compute_cartesian_path(waypoints, 0.01, False)
                     if fraction >= 0.9:  # At least 90% of path is valid
                         rospy.loginfo(f">>> [APPROACH]   Cartesian path computed: {fraction*100:.1f}% valid")
                         plan_success = True
@@ -424,15 +670,17 @@ class PickAndPlaceNode:
             
             # Strategy 3: Try alternative planners if previous strategies failed
             if not (plan_success and trajectory is not None):
-                # Reduce planning time per attempt but try more planners
+                # Use longer timeout for alternative planners - they might need more time
                 original_timeout = self.planning_timeout
-                self.arm.set_planning_time(10.0)  # Reduce to 10s per planner attempt
+                self.arm.set_planning_time(30.0)  # Give alternative planners more time
                 
                 alternative_planners = ['RRT', 'PRM', 'RRTstar', 'EST', 'SBL']
                 for planner_name in alternative_planners:
-                    rospy.logwarn(f">>> [APPROACH]   Strategy 3: Trying alternative planner: {planner_name}...")
+                    rospy.logwarn(f">>> [APPROACH]   Strategy 3: Trying alternative planner: {planner_name} (timeout: 30s)...")
                     try:
                         self.arm.set_planner_id(planner_name)
+                        # Ensure timeout is set for this planner
+                        self.arm.set_planning_time(30.0)
                         plan_result = self.arm.plan()
                         if len(plan_result) >= 2:
                             plan_success, trajectory = plan_result[0], plan_result[1]
@@ -457,7 +705,7 @@ class PickAndPlaceNode:
                 # Maximum relaxation - allow any orientation, larger position tolerance
                 self.arm.set_goal_orientation_tolerance(1.57)  # ~90 degrees (almost any orientation)
                 self.arm.set_goal_position_tolerance(0.10)  # 10cm position tolerance
-                self.arm.set_planning_time(5.0)  # Quick attempt
+                self.arm.set_planning_time(30.0)  # Give it more time with relaxed constraints
                 try:
                     plan_result = self.arm.plan()
                     if len(plan_result) >= 2:
@@ -475,6 +723,77 @@ class PickAndPlaceNode:
                 self.arm.set_goal_orientation_tolerance(0.5)
                 self.arm.set_goal_position_tolerance(0.05)
                 self.arm.set_planning_time(self.planning_timeout)
+            
+            # Strategy 5: Try planning to an intermediate waypoint (halfway between current and target)
+            if not (plan_success and trajectory is not None):
+                rospy.logwarn(">>> [APPROACH]   Strategy 5: Trying intermediate waypoint approach...")
+                try:
+                    # Calculate intermediate pose (halfway between current and target)
+                    current_pos = np.array([
+                        current_pose_before.position.x,
+                        current_pose_before.position.y,
+                        current_pose_before.position.z
+                    ])
+                    target_pos = np.array([
+                        approach_pose_odom.pose.position.x,
+                        approach_pose_odom.pose.position.y,
+                        approach_pose_odom.pose.position.z
+                    ])
+                    intermediate_pos = (current_pos + target_pos) / 2.0
+                    
+                    # Create intermediate pose with same orientation as target
+                    intermediate_pose = approach_pose_odom.pose
+                    intermediate_pose.position.x = intermediate_pos[0]
+                    intermediate_pose.position.y = intermediate_pos[1]
+                    intermediate_pose.position.z = intermediate_pos[2]
+                    
+                    rospy.loginfo(f">>> [APPROACH]   Intermediate waypoint: ({intermediate_pos[0]:.3f}, {intermediate_pos[1]:.3f}, {intermediate_pos[2]:.3f})")
+                    
+                    # Try planning to intermediate first
+                    self.arm.set_pose_target(intermediate_pose)
+                    self.arm.set_goal_orientation_tolerance(0.5)
+                    self.arm.set_goal_position_tolerance(0.10)
+                    self.arm.set_planning_time(10.0)
+                    
+                    plan_result = self.arm.plan()
+                    if len(plan_result) >= 2:
+                        intermediate_success, intermediate_trajectory = plan_result[0], plan_result[1]
+                    else:
+                        intermediate_success = plan_result[0] if plan_result else False
+                        intermediate_trajectory = plan_result[1] if len(plan_result) > 1 else None
+                    
+                    if intermediate_success and intermediate_trajectory is not None:
+                        rospy.loginfo(">>> [APPROACH]   Successfully planned to intermediate waypoint, executing...")
+                        execution_result = self.arm.execute(intermediate_trajectory, wait=True)
+                        if execution_result:
+                            rospy.loginfo(">>> [APPROACH]   Reached intermediate waypoint, now planning to final target...")
+                            rospy.sleep(0.5)  # Brief pause for state update
+                            
+                            # Now try planning to final target from intermediate position
+                            self.arm.set_pose_target(approach_pose_odom.pose)
+                            self.arm.set_goal_orientation_tolerance(0.5)
+                            self.arm.set_goal_position_tolerance(0.05)
+                            self.arm.set_planning_time(self.planning_timeout)
+                            
+                            plan_result = self.arm.plan()
+                            if len(plan_result) >= 2:
+                                plan_success, trajectory = plan_result[0], plan_result[1]
+                            else:
+                                plan_success = plan_result[0] if plan_result else False
+                                trajectory = plan_result[1] if len(plan_result) > 1 else None
+                            
+                            if plan_success and trajectory is not None:
+                                rospy.loginfo(">>> [APPROACH]   Successfully planned from intermediate to final target")
+                            else:
+                                rospy.logwarn(">>> [APPROACH]   Could not plan from intermediate to final target")
+                        else:
+                            rospy.logwarn(">>> [APPROACH]   Failed to execute intermediate trajectory")
+                    else:
+                        rospy.logwarn(">>> [APPROACH]   Could not plan to intermediate waypoint")
+                except Exception as e:
+                    rospy.logwarn(f">>> [APPROACH]   Intermediate waypoint strategy failed: {e}")
+                    import traceback
+                    rospy.logwarn(traceback.format_exc())
             
             if plan_success and trajectory is not None:
                 rospy.loginfo("="*70)
@@ -506,6 +825,17 @@ class PickAndPlaceNode:
                 
                 rospy.loginfo("="*70)
                 
+                # Publish visualization markers
+                # Publish path marker (line from current to target)
+                current_pose_before_stamped = PoseStamped()
+                current_pose_before_stamped.header.frame_id = 'odom'
+                current_pose_before_stamped.header.stamp = rospy.Time.now()
+                current_pose_before_stamped.pose = current_pose_before
+                self._publish_path_marker(current_pose_before, approach_pose_odom, frame_id='odom', color=(0.0, 0.0, 1.0, 1.0), scale=0.03)
+                
+                # Publish end effector marker at target
+                self._publish_end_effector_marker(approach_pose_odom, color=(0.0, 1.0, 0.0, 1.0), scale=0.08)
+                
                 # Execute the planned trajectory
                 rospy.loginfo(">>> [APPROACH]   Executing planned trajectory...")
                 execution_result = self.arm.execute(trajectory, wait=True)
@@ -513,6 +843,13 @@ class PickAndPlaceNode:
                 # Check arm position after execution
                 current_pose_after = self.arm.get_current_pose().pose
                 rospy.loginfo(f">>> [APPROACH]   Current arm position AFTER: ({current_pose_after.position.x:.3f}, {current_pose_after.position.y:.3f}, {current_pose_after.position.z:.3f})")
+                
+                # Publish end effector marker at current position
+                current_pose_after_stamped = PoseStamped()
+                current_pose_after_stamped.header.frame_id = 'odom'
+                current_pose_after_stamped.header.stamp = rospy.Time.now()
+                current_pose_after_stamped.pose = current_pose_after
+                self._publish_end_effector_marker(current_pose_after_stamped, color=(0.0, 0.5, 0.5, 1.0), scale=0.06)
                 
                 if execution_result:
                     rospy.loginfo(">>> [APPROACH]   *** EXECUTION SUCCEEDED ***")
@@ -526,22 +863,64 @@ class PickAndPlaceNode:
                 rospy.logerr(">>> [APPROACH]   *** PLANNING FAILED ***")
                 if error_code is not None:
                     rospy.logerr(f">>> [APPROACH]   Error code: {error_code}")
-                rospy.logwarn(">>> [APPROACH]   Trying fallback: arm.go() method...")
                 
-                # Fallback to go() method
-                rospy.loginfo(">>> [APPROACH]   Executing arm.go() - this may take a while...")
-                success = self.arm.go(wait=True)
+                # Strategy 6: Try joint space planning - sometimes pose planning fails but joint space works
+                rospy.logwarn(">>> [APPROACH]   Strategy 6: Trying joint space planning as fallback...")
+                try:
+                    # Try to get IK solution for target pose
+                    self.arm.set_pose_target(approach_pose_odom.pose)
+                    # Use async planning with longer timeout
+                    self.arm.set_planning_time(60.0)  # Give it a full minute
+                    self.arm.set_goal_orientation_tolerance(1.57)  # Maximum orientation tolerance
+                    self.arm.set_goal_position_tolerance(0.10)  # Larger position tolerance
+                    
+                    # Try planning again with very relaxed constraints
+                    plan_result = self.arm.plan()
+                    if len(plan_result) >= 2:
+                        plan_success, trajectory = plan_result[0], plan_result[1]
+                    else:
+                        plan_success = plan_result[0] if plan_result else False
+                        trajectory = plan_result[1] if len(plan_result) > 1 else None
+                    
+                    if plan_success and trajectory is not None:
+                        rospy.logwarn(">>> [APPROACH]   Success with joint space fallback!")
+                    else:
+                        rospy.logwarn(">>> [APPROACH]   Joint space planning also failed")
+                except Exception as e:
+                    rospy.logwarn(f">>> [APPROACH]   Joint space planning failed: {e}")
                 
-                # Check arm position after execution
-                current_pose_after = self.arm.get_current_pose().pose
-                rospy.loginfo(f">>> [APPROACH]   Current arm position AFTER: ({current_pose_after.position.x:.3f}, {current_pose_after.position.y:.3f}, {current_pose_after.position.z:.3f})")
+                # Final fallback: try go() method with very relaxed constraints
+                if not (plan_success and trajectory is not None):
+                    rospy.logwarn(">>> [APPROACH]   Trying final fallback: arm.go() method with relaxed constraints...")
+                    self.arm.set_goal_orientation_tolerance(1.57)
+                    self.arm.set_goal_position_tolerance(0.10)
+                    self.arm.set_planning_time(60.0)
+                    rospy.loginfo(">>> [APPROACH]   Executing arm.go() - this may take a while...")
+                    success = self.arm.go(wait=True)
                 
-                if success:
-                    rospy.loginfo(">>> [APPROACH] *** APPROACH COMPLETE ***")
-                    return True
+                    # Check arm position after execution
+                    current_pose_after = self.arm.get_current_pose().pose
+                    rospy.loginfo(f">>> [APPROACH]   Current arm position AFTER: ({current_pose_after.position.x:.3f}, {current_pose_after.position.y:.3f}, {current_pose_after.position.z:.3f})")
+                    
+                    if success:
+                        rospy.loginfo(">>> [APPROACH] *** APPROACH COMPLETE (via go() fallback) ***")
+                        return True
+                    else:
+                        rospy.logerr(">>> [APPROACH] Failed to approach object - all planning strategies failed")
+                        return False
                 else:
-                    rospy.logerr(">>> [APPROACH] Failed to approach object - planning or execution failed")
-                    return False
+                    # We already have a successful plan from Strategy 6
+                    rospy.loginfo(">>> [APPROACH]   Executing trajectory from Strategy 6...")
+                    execution_result = self.arm.execute(trajectory, wait=True)
+                    current_pose_after = self.arm.get_current_pose().pose
+                    rospy.loginfo(f">>> [APPROACH]   Current arm position AFTER: ({current_pose_after.position.x:.3f}, {current_pose_after.position.y:.3f}, {current_pose_after.position.z:.3f})")
+                    
+                    if execution_result:
+                        rospy.loginfo(">>> [APPROACH] *** APPROACH COMPLETE (via Strategy 6) ***")
+                        return True
+                    else:
+                        rospy.logerr(">>> [APPROACH] Failed to execute trajectory from Strategy 6")
+                        return False
         except Exception as e:
             rospy.logerr(f"Failed to approach: {e}")
             return False
@@ -614,7 +993,7 @@ class PickAndPlaceNode:
                 rospy.loginfo(">>> [GRASP]   Strategy 1: Trying Cartesian path for downward motion...")
                 try:
                     waypoints = [grasp_pose_odom.pose]
-                    (plan_cartesian, fraction) = self.arm.compute_cartesian_path(waypoints, 0.01, 0.0, False)
+                    (plan_cartesian, fraction) = self.arm.compute_cartesian_path(waypoints, 0.01, False)
                     if fraction >= 0.9:
                         rospy.loginfo(f">>> [GRASP]   Cartesian path computed: {fraction*100:.1f}% valid")
                         plan_success = True
@@ -813,7 +1192,12 @@ class PickAndPlaceNode:
             return None
     
     def _calculate_approach_pose(self, target_pose_base):
-        """Calculate approach pose (above object TOP SURFACE, not center)."""
+        """Calculate approach pose (above object TOP SURFACE, not center).
+        
+        For top-down picking, we want to ensure the arm_lift_joint is used to raise
+        the arm vertically. The approach Z should be high enough to allow the arm
+        to reach over the object.
+        """
         # The target_pose_base is the object's CENTER position
         center_pos = np.array([
             target_pose_base.pose.position.x,
@@ -829,10 +1213,20 @@ class PickAndPlaceNode:
         approach_pos = center_pos.copy()
         approach_pos[2] = top_surface_z + self.approach_height
         
+        # For top-down picking, ensure minimum height to allow arm_lift_joint usage
+        # arm_lift_joint range: 0.0 to 0.69m, arm base is at ~0.34m from base_link
+        # So total reachable height from base_link is ~1.03m (0.34 + 0.69)
+        # Ensure approach Z is at least 0.5m from base_link to encourage arm_lift usage
+        min_approach_z_from_base = 0.5
+        if approach_pos[2] < min_approach_z_from_base:
+            rospy.loginfo(f">>> [APPROACH]   Approach Z ({approach_pos[2]:.3f}m) is below minimum ({min_approach_z_from_base:.3f}m)")
+            rospy.loginfo(f">>> [APPROACH]   Adjusting to minimum to encourage arm_lift_joint usage")
+            approach_pos[2] = min_approach_z_from_base
+        
         rospy.loginfo(f">>> [APPROACH]   Object center Z: {center_pos[2]:.3f}m")
         rospy.loginfo(f">>> [APPROACH]   Object height: {self.object_height:.3f}m")
         rospy.loginfo(f">>> [APPROACH]   Top surface Z: {top_surface_z:.3f}m (center + height/2)")
-        rospy.loginfo(f">>> [APPROACH]   Approach Z: {approach_pos[2]:.3f}m (top + {self.approach_height:.3f}m)")
+        rospy.loginfo(f">>> [APPROACH]   Approach Z: {approach_pos[2]:.3f}m (top + {self.approach_height:.3f}m, min: {min_approach_z_from_base:.3f}m)")
         
         # Use top-down orientation (same as grasp pose) for consistent planning
         # This ensures the arm can smoothly transition from approach to grasp
@@ -963,6 +1357,68 @@ class PickAndPlaceNode:
         avg_pose.pose.orientation = self.pose_buffer[-1].pose.orientation  # Use most recent orientation
         
         return avg_pose
+    
+    def _publish_target_pose_marker(self, pose_stamped, color=(1.0, 0.0, 0.0, 1.0), scale=0.1):
+        """Publish a marker for the target pose."""
+        marker = Marker()
+        marker.header = pose_stamped.header
+        marker.ns = "target_pose"
+        marker.id = self.marker_id_counter
+        self.marker_id_counter += 1
+        marker.type = Marker.ARROW
+        marker.action = Marker.ADD
+        marker.pose = pose_stamped.pose
+        marker.scale.x = scale * 2.0  # Arrow length
+        marker.scale.y = scale * 0.5  # Arrow width
+        marker.scale.z = scale * 0.5  # Arrow height
+        marker.color = ColorRGBA(*color)
+        marker.lifetime = rospy.Duration(0)  # 0 = never auto-delete
+        self.target_pose_marker_pub.publish(marker)
+    
+    def _publish_end_effector_marker(self, pose_stamped, color=(0.0, 1.0, 0.0, 1.0), scale=0.05):
+        """Publish a marker for the end effector pose."""
+        marker = Marker()
+        marker.header = pose_stamped.header
+        marker.ns = "end_effector"
+        marker.id = self.marker_id_counter
+        self.marker_id_counter += 1
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose = pose_stamped.pose
+        marker.scale.x = scale * 2.0
+        marker.scale.y = scale * 2.0
+        marker.scale.z = scale * 2.0
+        marker.color = ColorRGBA(*color)
+        marker.lifetime = rospy.Duration(0)
+        self.end_effector_marker_pub.publish(marker)
+    
+    def _publish_path_marker(self, start_pose, end_pose_stamped, frame_id='odom', color=(0.0, 0.0, 1.0, 1.0), scale=0.02):
+        """Publish a marker for the planned path (line from start to end)."""
+        marker = Marker()
+        marker.header.frame_id = frame_id
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "planned_path"
+        marker.id = self.marker_id_counter
+        self.marker_id_counter += 1
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = scale
+        marker.color = ColorRGBA(*color)
+        marker.lifetime = rospy.Duration(10.0)  # Show for 10 seconds
+        
+        # Create line from start to end
+        start_pt = Point()
+        start_pt.x = start_pose.position.x
+        start_pt.y = start_pose.position.y
+        start_pt.z = start_pose.position.z
+        
+        end_pt = Point()
+        end_pt.x = end_pose_stamped.pose.position.x
+        end_pt.y = end_pose_stamped.pose.position.y
+        end_pt.z = end_pose_stamped.pose.position.z
+        
+        marker.points = [start_pt, end_pt]
+        self.path_marker_pub.publish(marker)
     
     def _publish_status(self, status):
         """Publish current status."""

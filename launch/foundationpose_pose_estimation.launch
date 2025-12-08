@@ -1,7 +1,8 @@
 <?xml version="1.0"?>
 <launch>
   <!-- Arguments -->
-  <arg name="mesh_file" default="$(find final-project-OfficialBishal)/meshes/mustard.obj" />
+  <!-- mesh_file: Leave empty to use default based on object_name (meshes/{object_name}/textured.obj) -->
+  <arg name="mesh_file" default="" />
   <arg name="rgb_topic" default="/hsrb/head_rgbd_sensor/rgb/image_rect_color" />
   <arg name="depth_topic" default="/hsrb/head_rgbd_sensor/depth_registered/image_rect_raw" />
   <arg name="camera_info_topic" default="/hsrb/head_rgbd_sensor/rgb/camera_info" />
@@ -22,6 +23,9 @@
         pkg="final-project-OfficialBishal" 
         type="run_foundationpose.sh" 
         output="screen">
+    <!-- Load config file for parameters (including object_name) -->
+    <rosparam file="$(find final-project-OfficialBishal)/config/foundationpose_config.yaml" command="load" />
+    <!-- Override mesh_file if provided as argument (empty string means use default) -->
     <param name="mesh_file" value="$(arg mesh_file)" />
     <param name="rgb_topic" value="$(arg rgb_topic)" />
     <param name="depth_topic" value="$(arg depth_topic)" />
@@ -31,8 +35,11 @@
     <param name="est_refine_iter" value="$(arg est_refine_iter)" />
     <param name="track_refine_iter" value="$(arg track_refine_iter)" />
     <param name="debug" value="$(arg debug)" />
+    <!-- Override mask settings from config file -->
+    <param name="mask/use_mask" value="$(arg use_mask)" />
     <param name="use_mask" value="$(arg use_mask)" />
     <param name="mask_topic" value="$(arg mask_topic)" />
+    <param name="mask/mask_topic" value="$(arg mask_topic)" />
     
     <!-- Set environment to use foundationpose conda environment -->
     <env name="CONDA_DEFAULT_ENV" value="foundationpose" />

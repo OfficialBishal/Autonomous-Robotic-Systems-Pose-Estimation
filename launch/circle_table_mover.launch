@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Launch file to move robot in a circle around the table -->
+  <!-- Use this to test pose estimation from different viewing angles -->
+  <!-- Run pose estimation separately with your preferred method -->
+  
+  <!-- Arguments -->
+  <arg name="table_center_x" default="3.0" />
+  <arg name="table_center_y" default="4.0" />
+  <arg name="circle_radius" default="1.5" />
+  <arg name="num_waypoints" default="8" />
+  <arg name="num_loops" default="-1" />  <!-- -1 means infinite loops, set to positive number for specific count -->
+  <arg name="wait_at_waypoint" default="5.0" />
+  <arg name="waypoint1_x" default="3.0" />
+  <arg name="waypoint1_y" default="2.5" />
+  
+  <!-- Circle Table Mover node -->
+  <node name="circle_table_mover" 
+        pkg="final-project-OfficialBishal" 
+        type="circle_table_mover.py" 
+        output="screen">
+    <param name="table_center_x" value="$(arg table_center_x)" />
+    <param name="table_center_y" value="$(arg table_center_y)" />
+    <param name="radius" value="$(arg circle_radius)" />
+    <param name="num_waypoints" value="$(arg num_waypoints)" />
+    <param name="num_loops" value="$(arg num_loops)" />
+    <param name="wait_at_waypoint" value="$(arg wait_at_waypoint)" />
+    <param name="waypoint1_x" value="$(arg waypoint1_x)" />
+    <param name="waypoint1_y" value="$(arg waypoint1_y)" />
+  </node>
+  
+</launch>
+

@@ -152,7 +152,7 @@ catkin_package(
 ## Specify additional locations of header files
 ## Your package locations should be listed before other locations
 include_directories(
-# include
+  include
   ${catkin_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
 )
@@ -177,13 +177,41 @@ endif()
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
 ## The recommended prefix ensures that target names across packages don't collide
-add_executable(opencv_pose_estimation_node src/opencv_pose_estimation_node.cpp)
+add_executable(opencv_pose_estimation_node 
+  src/opencv_pose_estimation_node.cpp
+  include/opencv_pnp/Model.cpp
+  include/opencv_pnp/RobustMatcher.cpp
+  include/opencv_pnp/PnPProblem.cpp
+  include/opencv_pnp/Utils.cpp
+  include/opencv_pnp/Mesh.cpp
+  include/opencv_pnp/CsvReader.cpp
+  include/opencv_pnp/CsvWriter.cpp
+  include/opencv_pnp/ModelRegistration.cpp
+)
 
-## Add cmake target dependencies of the executable
+add_executable(opencv_model_registration_node 
+  src/opencv_model_registration_node.cpp
+  include/opencv_pnp/Model.cpp
+  include/opencv_pnp/RobustMatcher.cpp
+  include/opencv_pnp/PnPProblem.cpp
+  include/opencv_pnp/Utils.cpp
+  include/opencv_pnp/Mesh.cpp
+  include/opencv_pnp/CsvReader.cpp
+  include/opencv_pnp/CsvWriter.cpp
+  include/opencv_pnp/ModelRegistration.cpp
+)
+
+## Add cmake target dependencies of the executables
 add_dependencies(opencv_pose_estimation_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(opencv_model_registration_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(opencv_pose_estimation_node
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBS}
+)
+
+target_link_libraries(opencv_model_registration_node
   ${catkin_LIBRARIES}
   ${OpenCV_LIBS}
 )
@@ -204,6 +232,7 @@ elseif(yaml-cpp_FOUND)
 endif()
 # Always try to link yaml-cpp (fallback)
 target_link_libraries(opencv_pose_estimation_node yaml-cpp)
+target_link_libraries(opencv_model_registration_node yaml-cpp)
 
 #############
 ## Install ##

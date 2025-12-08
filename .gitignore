@@ -86,11 +86,12 @@ yolov*.pt
 segment-anything/checkpoints/
 
 # FoundationPose debug output
-foundationpose_debug/
-*.png
-*.jpg
-!meshes/*.png
-!meshes/*.jpg
+# foundationpose_debug/
+# *.png
+# *.jpg
+# !meshes/*.png
+# !meshes/*.jpg
+track_vis/
 
 # Test outputs
 test_outputs/

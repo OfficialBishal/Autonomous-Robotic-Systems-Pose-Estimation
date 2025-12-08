@@ -43,15 +43,27 @@ object_frame_id: "object_pose"
 # ============================================================================
 foundationpose:
   # Number of refinement iterations for initial pose estimation
-  # Reduced from 5 to 3 to save GPU memory
-  est_refine_iter: 3
+  # Lower = faster but less accurate. For speed: 1, for accuracy: 3-5
+  est_refine_iter: 1  # Reduced to 1 for faster processing (was 3)
   
-  # Number of refinement iterations for tracking
-  track_refine_iter: 2
+  # Number of refinement iterations for tracking (not currently used)
+  # Lower = faster. Tracking is much faster than registration
+  track_refine_iter: 1  # Reduced to 1 for faster processing (was 2)
   
   # Debug level (0=off, 1=basic, 2=detailed, 3=verbose)
-  # Reduced to 1 to save memory (debug=2 saves images which uses memory)
-  debug: 2
+  # debug=2 saves images which is SLOW! Use 0 for fastest, 1 for basic logging
+  debug: 0  # Disabled for faster processing (was 2, which saves images)
+  
+  # Pose consensus buffer
+  # Circular buffer size for majority voting to filter outliers
+  pose_buffer_size: 10  # Number of recent poses to store for consensus voting
+  pose_consensus_threshold: 0.1  # Position threshold in meters (10cm) for poses to be considered similar
+  pose_consensus_orientation_threshold: 30.0  # Orientation threshold in degrees for poses to be considered similar
+  pose_consensus_time_threshold: 0.5  # Time threshold in seconds for poses to be considered from similar times
+  
+  # Parallel processing
+  # Number of parallel workers for pose estimation (higher = more throughput, but uses more GPU memory)
+  max_parallel_workers: 8  # Maximum number of concurrent pose estimation tasks
 
 # ============================================================================
 # Mask Parameters
@@ -106,12 +118,16 @@ publish_quality:
 # ============================================================================
 sam:
   # SAM model type: vit_b (fastest), vit_l (balanced), or vit_h (most accurate)
-  sam_model_type: "vit_h"
+  sam_model_type: "vit_b"
   
   # Path to SAM checkpoint file
-  # Path relative to workspace root: src/final-project-OfficialBishal/sam-checkpoints/sam_vit_h.pth
-  # Or use absolute path: /home/local/csc752/csc752/hsr_robocanes_omniverse/src/final-project-OfficialBishal/sam-checkpoints/sam_vit_h.pth
-  sam_checkpoint_path: "src/final-project-OfficialBishal/sam-checkpoints/sam_vit_h.pth"
+  # Path relative to workspace root: src/final-project-OfficialBishal/sam-checkpoints/sam_vit_b.pth
+  # Or use absolute path: /home/local/csc752/csc752/hsr_robocanes_omniverse/src/final-project-OfficialBishal/sam-checkpoints/sam_vit_b.pth
+  sam_checkpoint_path: "src/final-project-OfficialBishal/sam-checkpoints/sam_vit_b.pth"
+  
+  # SAM checkpoint path for Grounded SAM (uses different parameter name)
+  # Can be relative to workspace root or absolute path
+  sam_checkpoint: "src/final-project-OfficialBishal/sam-checkpoints/sam_vit_b.pth"
   
   # Segmentation strategy: 'center_point', 'point', 'box', 'automatic', or 'detection'
   segmentation_strategy: "detection"
@@ -152,7 +168,8 @@ object_detection:
   
   # YOLO confidence threshold (0.0 to 1.0)
   # Lower values detect more objects but may include false positives
-  detection_confidence: 0.15  # Lowered from 0.25 to detect cracker box better
+  # For cracker_box, use lower threshold since it's not a native COCO class
+  detection_confidence: 0.10  # Lowered to 0.10 to detect cracker box better (was 0.15)
   
   # YOLO IoU threshold for non-maximum suppression (0.0 to 1.0)
   detection_iou: 0.45
@@ -171,11 +188,11 @@ grounded_sam:
   
   # Text prompt for object detection (e.g., "cracker box", "bottle", "mustard bottle")
   # If empty, will auto-generate from object_name (e.g., "cracker_box" -> "cracker box")
-  text_prompt: ""  # Leave empty to auto-generate from object_name
+  text_prompt: "red cracker box that is on the table"  # Leave empty to auto-generate from object_name
   
-  # Detection thresholds
-  box_threshold: 0.3      # Box confidence threshold (0.0 to 1.0)
-  text_threshold: 0.25    # Text confidence threshold (0.0 to 1.0)
+  # Detection thresholds (higher = fewer false positives, but may miss some detections)
+  box_threshold: 0.80     # Box confidence threshold (0.0 to 1.0) - very strict to reduce false positives
+  text_threshold: 0.80    # Text confidence threshold (0.0 to 1.0) - very strict to reduce false positives
   iou_threshold: 0.5      # IoU threshold for NMS (0.0 to 1.0)
 
 # ============================================================================

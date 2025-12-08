@@ -13,12 +13,27 @@
     <param name="image_topic" value="$(arg image_topic)" />
     <param name="camera_info_topic" value="$(arg camera_info_topic)" />
     <param name="frame_id" value="$(arg frame_id)" />
+    
+    <!-- Feature detection parameters -->
     <param name="num_keypoints" value="2000" />
+    <param name="feature" value="ORB" />
+    <param name="use_flann" value="false" />
+    <param name="fast_match" value="true" />
+    
+    <!-- Matching parameters -->
     <param name="ratio_test" value="0.7" />
+    
+    <!-- RANSAC parameters -->
     <param name="ransac_iterations" value="500" />
-    <param name="ransac_reprojection_error" value="2.0" />
-    <param name="ransac_confidence" value="0.95" />
+    <param name="ransac_reprojection_error" value="6.0" />
+    <param name="ransac_confidence" value="0.99" />
+    <param name="pnp_method" value="0" />  <!-- 0=ITERATIVE, 1=EPNP, 2=P3P, 3=DLS, 5=AP3P -->
+    
+    <!-- Kalman filter parameters -->
     <param name="min_inliers_kalman" value="30" />
+    
+    <!-- Visualization -->
+    <param name="publish_visualization" value="true" />
   </node>
 </launch>
 

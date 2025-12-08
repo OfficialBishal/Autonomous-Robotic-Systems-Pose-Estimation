@@ -11,8 +11,14 @@ and publishes masks for FoundationPose pose estimation.
 # Standard library
 import os
 import sys
+import time
 import numpy as np
 import cv2
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
 # ROS
 import rospy
@@ -64,18 +70,56 @@ class SAMSegmentationNode:
         # Setup ROS communication
         self._setup_ros_communication()
         
+        # Initialize pynvml if available (for GPU utilization monitoring)
+        self.pynvml_initialized = False
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            self.pynvml_initialized = True
+        except (ImportError, Exception):
+            pass
+        
+        # Performance metrics throttling (print every N frames)
+        self.performance_print_interval = 10  # Print every 10 frames
+        self.frame_counter = 0
+        
+        # Metrics saving
+        import os
+        # Get workspace root from ROS package path or environment
+        workspace_root = None
+        if 'ROS_PACKAGE_PATH' in os.environ:
+            # Use first path in ROS_PACKAGE_PATH (usually workspace/src)
+            package_paths = os.environ['ROS_PACKAGE_PATH'].split(':')
+            if package_paths:
+                # Go up from src/ to workspace root
+                src_path = package_paths[0]
+                if src_path.endswith('/src'):
+                    workspace_root = os.path.dirname(src_path)
+        
+        # Fallback to common workspace location
+        if not workspace_root:
+            workspace_root = os.path.expanduser('~/hsr_robocanes_omniverse')
+        
+        self.metrics_dir = os.path.join(workspace_root, 'src', 'final-project-OfficialBishal', 'metrics', 'data')
+        os.makedirs(self.metrics_dir, exist_ok=True)
+        self.metrics_file = os.path.join(self.metrics_dir, 'yolo_sam_metrics.json')
+        self.metrics_data = []
+        rospy.loginfo(f"Metrics will be saved to: {self.metrics_file}")
+        
         rospy.loginfo("SAM Segmentation node initialized")
         rospy.loginfo(f"Subscribing to RGB: {self.rgb_topic}")
         rospy.loginfo(f"Publishing mask to: {self.mask_topic}")
         rospy.loginfo(f"Using model: {self.model_type}")
         rospy.loginfo(f"Segmentation strategy: {self.segmentation_strategy}")
+        if not PSUTIL_AVAILABLE:
+            rospy.logwarn("psutil not available, CPU monitoring will be disabled")
     
     # Initialization Methods
     
     def _load_parameters(self):
         """Load ROS parameters from config file (organized structure)."""
         # Object name parameter (used for default mask topic and class mapping)
-        self.object_name = rospy.get_param('~object_name', 'mustard_bottle')
+        self.object_name = rospy.get_param('~object_name', 'cracker_box')
         rospy.loginfo(f"Object name: {self.object_name}")
         
         # Topic parameters (from config file nested structure, with fallbacks)
@@ -287,22 +331,29 @@ class SAMSegmentationNode:
         
         return img_array
     
-    def numpy_to_ros_image(self, img_array, encoding='mono8', frame_id=None):
+    def numpy_to_ros_image(self, img_array, encoding='mono8', frame_id=None, header=None):
         """
         Convert numpy array to ROS Image message.
         
         Args:
             img_array: numpy.ndarray image
             encoding: ROS image encoding (e.g., 'mono8', 'rgb8')
-            frame_id: Frame ID for header
+            frame_id: Frame ID for header (used if header is None)
+            header: ROS message header to copy timestamp and frame_id from (CRITICAL for synchronization)
         
         Returns:
             sensor_msgs.msg.Image: ROS Image message
         """
         img_msg = Image()
-        img_msg.header.stamp = rospy.Time.now()
-        if frame_id:
-            img_msg.header.frame_id = frame_id
+        if header is not None:
+            # CRITICAL: Use the original header timestamp and frame_id for proper synchronization
+            img_msg.header.stamp = header.stamp
+            img_msg.header.frame_id = header.frame_id
+        else:
+            # Fallback: use current time (should only happen if header not provided)
+            img_msg.header.stamp = rospy.Time.now()
+            if frame_id:
+                img_msg.header.frame_id = frame_id
         
         if len(img_array.shape) == 2:
             # Grayscale
@@ -326,6 +377,118 @@ class SAMSegmentationNode:
             raise ValueError(f"Unsupported image shape: {img_array.shape}")
         
         return img_msg
+    
+    # Performance Monitoring
+    
+    def get_gpu_usage(self):
+        """Get GPU memory and utilization usage."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                memory_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+                memory_reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+                memory_total = torch.cuda.get_device_properties(device).total_memory / 1024**3  # GB
+                memory_allocated_pct = (memory_allocated / memory_total) * 100
+                memory_reserved_pct = (memory_reserved / memory_total) * 100
+                
+                gpu_util = None
+                if self.pynvml_initialized:
+                    try:
+                        import pynvml
+                        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+                        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                        gpu_util = util.gpu
+                    except Exception:
+                        pass
+                
+                return {
+                    'memory_allocated_gb': memory_allocated,
+                    'memory_reserved_gb': memory_reserved,
+                    'memory_total_gb': memory_total,
+                    'memory_allocated_pct': memory_allocated_pct,
+                    'memory_reserved_pct': memory_reserved_pct,
+                    'gpu_util_pct': gpu_util
+                }
+        except Exception:
+            pass
+        return None
+    
+    def get_cpu_usage(self):
+        """Get CPU usage percentage."""
+        if PSUTIL_AVAILABLE:
+            try:
+                process = psutil.Process(os.getpid())
+                cpu_percent = process.cpu_percent(interval=0.1)
+                cpu_system = psutil.cpu_percent(interval=0.1)
+                memory_info = process.memory_info()
+                memory_mb = memory_info.rss / 1024 / 1024  # MB
+                return {
+                    'cpu_percent': cpu_percent,
+                    'cpu_system': cpu_system,
+                    'memory_mb': memory_mb
+                }
+            except Exception:
+                pass
+        return None
+    
+    def _save_metrics(self, elapsed_time, gpu_info, cpu_info):
+        """Save performance metrics to JSON file."""
+        try:
+            import json
+            import rospy
+            
+            metric_entry = {
+                'timestamp': rospy.get_time(),
+                'time_ms': elapsed_time * 1000.0,
+                'time_s': elapsed_time
+            }
+            
+            if gpu_info:
+                metric_entry.update({
+                    'gpu_memory_allocated_gb': gpu_info.get('memory_allocated_gb', 0),
+                    'gpu_memory_reserved_gb': gpu_info.get('memory_reserved_gb', 0),
+                    'gpu_memory_total_gb': gpu_info.get('memory_total_gb', 0),
+                    'gpu_memory_allocated_pct': gpu_info.get('memory_allocated_pct', 0),
+                    'gpu_memory_reserved_pct': gpu_info.get('memory_reserved_pct', 0),
+                    'gpu_utilization_pct': gpu_info.get('gpu_util_pct', 0) if gpu_info.get('gpu_util_pct') is not None else 0
+                })
+            
+            if cpu_info:
+                metric_entry.update({
+                    'cpu_process_pct': cpu_info.get('cpu_percent', 0),
+                    'cpu_system_pct': cpu_info.get('cpu_system', 0),
+                    'memory_mb': cpu_info.get('memory_mb', 0)
+                })
+            
+            self.metrics_data.append(metric_entry)
+            
+            # Save to file periodically (every 10 entries to reduce I/O)
+            if len(self.metrics_data) % 10 == 0:
+                with open(self.metrics_file, 'w') as f:
+                    json.dump(self.metrics_data, f, indent=2)
+        except Exception as e:
+            rospy.logwarn(f"Failed to save metrics: {e}")
+    
+    def print_performance_metrics(self, elapsed_time, gpu_info, cpu_info, method_name="YOLO+SAM"):
+        """Print performance metrics in a formatted way."""
+        rospy.loginfo("=" * 80)
+        rospy.loginfo(f"PERFORMANCE METRICS - {method_name.upper()} SEGMENTATION")
+        rospy.loginfo("=" * 80)
+        rospy.loginfo(f"⏱️  Time: {elapsed_time*1000:.2f} ms ({elapsed_time:.3f} s)")
+        
+        if gpu_info:
+            rospy.loginfo(f"🎮 GPU Memory: {gpu_info['memory_allocated_gb']:.2f} GB / {gpu_info['memory_total_gb']:.2f} GB ({gpu_info['memory_allocated_pct']:.1f}%)")
+            rospy.loginfo(f"🎮 GPU Reserved: {gpu_info['memory_reserved_gb']:.2f} GB ({gpu_info['memory_reserved_pct']:.1f}%)")
+            if gpu_info['gpu_util_pct'] is not None:
+                rospy.loginfo(f"🎮 GPU Utilization: {gpu_info['gpu_util_pct']:.1f}%")
+        
+        if cpu_info:
+            rospy.loginfo(f"💻 CPU (Process): {cpu_info['cpu_percent']:.1f}%")
+            rospy.loginfo(f"💻 CPU (System): {cpu_info['cpu_system']:.1f}%")
+            rospy.loginfo(f"💻 Memory (Process): {cpu_info['memory_mb']:.1f} MB")
+        
+        rospy.loginfo("=" * 80)
     
     # Segmentation Methods
     
@@ -458,10 +621,16 @@ class SAMSegmentationNode:
             rospy.loginfo_throttle(5.0, f"YOLO detected classes: {detected_classes}")
         
         # Map object names to YOLO class names (COCO dataset classes)
-        # COCO doesn't have "box", so we use alternative classes
+        # COCO doesn't have "box" or "cracker_box", so we use alternative classes
+        # COCO classes that might match a box-like object:
+        # - 'bottle' (rectangular container)
+        # - 'book' (rectangular object)
+        # - 'suitcase' (box-like container)
+        # - 'remote' (small rectangular object)
+        # - 'mouse' (small rectangular object)
         class_name_map = {
-            'cracker_box': ['bottle', 'book'],  # Cracker box might be detected as bottle or book
-            'box': ['bottle', 'book'],
+            'cracker_box': ['bottle', 'book', 'suitcase', 'remote', 'mouse'],  # Try multiple box-like classes
+            'box': ['bottle', 'book', 'suitcase', 'remote', 'mouse'],
             'mustard_bottle': ['bottle'],
             'bottle': ['bottle'],
         }
@@ -533,6 +702,18 @@ class SAMSegmentationNode:
     
     def image_callback(self, rgb_msg):
         """Callback for RGB image."""
+        # CRITICAL: Store the original RGB image header (timestamp and frame_id)
+        # The mask MUST use the same timestamp as the RGB image it was generated from
+        # This ensures proper synchronization with RGB/depth images in FoundationPose
+        original_header = rgb_msg.header
+        
+        # Get initial resource usage
+        gpu_info_before = self.get_gpu_usage()
+        cpu_info_before = self.get_cpu_usage()
+        
+        # Start timing
+        start_time = time.time()
+        
         try:
             # Convert ROS image to numpy
             rgb_image = self.ros_image_to_numpy(rgb_msg, desired_encoding='rgb8')
@@ -570,11 +751,35 @@ class SAMSegmentationNode:
             # Convert mask to uint8 (0 or 255)
             mask_uint8 = (mask.astype(np.uint8) * 255)
             
-            # Publish mask
+            # End timing
+            elapsed_time = time.time() - start_time
+            
+            # Get resource usage after segmentation
+            gpu_info_after = self.get_gpu_usage()
+            cpu_info_after = self.get_cpu_usage()
+            
+            # Use after values for reporting (peak usage during computation)
+            gpu_info = gpu_info_after if gpu_info_after else gpu_info_before
+            cpu_info = cpu_info_after if cpu_info_after else cpu_info_before
+            
+            # Print performance metrics only at intervals (to reduce terminal clutter)
+            self.frame_counter += 1
+            method_name = f"YOLO+SAM ({self.segmentation_strategy})" if self.segmentation_strategy == 'detection' else f"SAM ({self.segmentation_strategy})"
+            if self.frame_counter % self.performance_print_interval == 0:
+                self.print_performance_metrics(elapsed_time, gpu_info, cpu_info, method_name)
+            else:
+                # Just log time for non-printed frames
+                rospy.logdebug(f"{method_name}: {elapsed_time*1000:.1f} ms")
+            
+            # Save metrics to file
+            self._save_metrics(elapsed_time, gpu_info, cpu_info)
+            
+            # Publish mask with ORIGINAL RGB timestamp (CRITICAL for synchronization)
             mask_msg = self.numpy_to_ros_image(
                 mask_uint8,
                 encoding='mono8',
-                frame_id=rgb_msg.header.frame_id
+                frame_id=rgb_msg.header.frame_id,
+                header=original_header
             )
             self.mask_pub.publish(mask_msg)
             
@@ -583,7 +788,8 @@ class SAMSegmentationNode:
             rospy.loginfo_throttle(5.0, f"SAM segmentation: mask area = {mask_area} pixels ({mask_area/(width*height)*100:.1f}% of image)")
             
         except Exception as e:
-            rospy.logerr(f"Error in SAM segmentation: {e}")
+            elapsed_time = time.time() - start_time
+            rospy.logerr(f"Error in SAM segmentation (took {elapsed_time*1000:.2f} ms): {e}")
             import traceback
             rospy.logerr(traceback.format_exc())
     
@@ -595,10 +801,28 @@ class SAMSegmentationNode:
 
 # Main Execution
 
-if __name__ == '__main__':
+def main():
+    """Main function."""
+    node = None
     try:
         node = SAMSegmentationNode()
         node.run()
     except rospy.ROSInterruptException:
         pass
+    except KeyboardInterrupt:
+        rospy.loginfo("Shutting down SAM Segmentation node")
+    finally:
+        # Save final metrics on shutdown
+        if node is not None:
+            try:
+                import json
+                if hasattr(node, 'metrics_data') and node.metrics_data:
+                    with open(node.metrics_file, 'w') as f:
+                        json.dump(node.metrics_data, f, indent=2)
+                    rospy.loginfo(f"Saved {len(node.metrics_data)} metrics entries to {node.metrics_file}")
+            except Exception as e:
+                rospy.logwarn(f"Failed to save final metrics: {e}")
+
+if __name__ == '__main__':
+    main()
 

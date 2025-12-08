@@ -15,6 +15,15 @@ It also compares the estimated pose with ground truth from Isaac Sim.
 import os
 import sys
 import ctypes
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, Future
+from copy import deepcopy
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
 
 # ROS
 import rospy
@@ -131,10 +140,62 @@ class FoundationPoseNode:
         # Initialize state variables
         self.camera_K = None
         self.pose_initialized = False
-        self.last_pose = None
+        # Track last published pose for temporal consistency checking
+        self.last_published_pose = None
+        self.last_published_time = None
+        self.pose_jump_threshold = 0.5  # Maximum allowed position jump in meters
         self.gt_pose = None
         self.gt_pose_received = False
+        
+        # Manual synchronization buffers (for exact timestamp matching)
+        # Store latest messages keyed by timestamp
+        self.rgb_buffer = {}  # {timestamp: rgb_msg}
+        self.depth_buffer = {}  # {timestamp: depth_msg}
+        self.info_buffer = {}  # {timestamp: info_msg}
+        self.mask_buffer = {}  # {timestamp: mask_msg}
+        self.buffer_lock = threading.Lock()  # Thread lock for buffer access
+        self.buffer_max_age = rospy.Duration(2.0)  # Keep messages for max 2 seconds
+        
+        # Circular buffer for pose consensus
+        self.pose_buffer_size = rospy.get_param('~pose_buffer_size', 10)  # Store last 10 poses
+        self.pose_buffer = []  # Circular buffer of recent pose estimates (stores tuples: (pose_matrix, header))
+        self.pose_consensus_threshold = rospy.get_param('~pose_consensus_threshold', 0.1)  # 10cm position threshold for consensus
+        self.pose_consensus_orientation_threshold = rospy.get_param('~pose_consensus_orientation_threshold', 15.0)  # 15 degrees orientation threshold
+        self.pose_consensus_time_threshold = rospy.get_param('~pose_consensus_time_threshold', 0.5)  # Time threshold for consensus clustering
+        rospy.loginfo(f"Pose consensus buffer: size={self.pose_buffer_size}, pos_threshold={self.pose_consensus_threshold}m, orient_threshold={self.pose_consensus_orientation_threshold}°, time_threshold={self.pose_consensus_time_threshold}s")
+        
+        # Marker color alternation for visual debugging
+        self.marker_color_counter = 0  # Counter to alternate between red and blue
         # These will be loaded in _load_parameters() after config file is loaded
+        
+        # Throttling for synchronized printing
+        self._last_performance_print_time = 0
+        self._last_comparison_time = 0
+        
+        # Parallel processing setup
+        self.max_parallel_workers = rospy.get_param('~max_parallel_workers', 8)  # Increased to 16 for higher throughput and more buffer updates
+        self.pose_executor = ThreadPoolExecutor(max_workers=self.max_parallel_workers, thread_name_prefix="FoundationPose")
+        self.pose_lock = threading.Lock()  # Thread lock for buffer and publisher access
+        self.active_poses = {}  # Track active pose estimations by timestamp: {timestamp: Future}
+        rospy.loginfo(f"Parallel processing enabled: {self.max_parallel_workers} workers")
+        
+        # Metrics saving
+        import os
+        workspace_root = os.path.expanduser('~/hsr_robocanes_omniverse')
+        self.metrics_dir = os.path.join(workspace_root, 'src', 'final-project-OfficialBishal', 'metrics', 'data')
+        os.makedirs(self.metrics_dir, exist_ok=True)
+        self.metrics_file = os.path.join(self.metrics_dir, 'foundationpose_metrics.json')
+        self.metrics_data = []
+        rospy.loginfo(f"Metrics will be saved to: {self.metrics_file}")
+        
+        # Initialize pynvml if available (for GPU utilization monitoring)
+        self.pynvml_initialized = False
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            self.pynvml_initialized = True
+        except (ImportError, Exception):
+            pass
         
         
         # Setup ROS communication
@@ -151,6 +212,8 @@ class FoundationPoseNode:
         rospy.loginfo(f"Subscribing to RGB: {self.rgb_topic}")
         rospy.loginfo(f"Subscribing to Depth: {self.depth_topic}")
         rospy.loginfo(f"Subscribing to CameraInfo: {self.camera_info_topic}")
+        if not PSUTIL_AVAILABLE:
+            rospy.logwarn("psutil not available, CPU monitoring will be disabled")
         # Object name will be set in _load_parameters, log it after
     
     # ========================================================================
@@ -160,7 +223,7 @@ class FoundationPoseNode:
     def _load_parameters(self):
         """Load ROS parameters from config file (organized structure)."""
         # Object name parameter (used for topics and default paths)
-        self.object_name = rospy.get_param('~object_name', 'mustard_bottle')
+        self.object_name = rospy.get_param('~object_name', 'cracker_box')
         rospy.loginfo(f"Object name: {self.object_name}")
         
         # Mesh file parameter (top level)
@@ -287,9 +350,9 @@ class FoundationPoseNode:
         # TF listener for transforming poses to odom frame (using old tf API for PoseStamped)
         self.tf_listener = TransformListener()
         
-        # Publishers
-        self.pose_pub = rospy.Publisher('~pose', PoseStamped, queue_size=10)
-        self.marker_pub = rospy.Publisher('~markers', MarkerArray, queue_size=10)
+        # Publishers (queue_size=1 to avoid buffering old poses)
+        self.pose_pub = rospy.Publisher('~pose', PoseStamped, queue_size=1)
+        self.marker_pub = rospy.Publisher('~markers', MarkerArray, queue_size=1)
         
         # Subscriber for ground truth pose (topic based on object name)
         gt_topic = f'/{self.object_name}/ground_truth_pose'
@@ -391,19 +454,117 @@ class FoundationPoseNode:
             sys.exit(1)
     
     def _setup_subscribers(self):
-        """Setup synchronized image subscribers."""
-        rgb_sub = message_filters.Subscriber(self.rgb_topic, Image)
-        depth_sub = message_filters.Subscriber(self.depth_topic, Image)
-        info_sub = message_filters.Subscriber(self.camera_info_topic, CameraInfo)
-        
-        # Synchronize subscribers
+        """Setup image subscribers with manual timestamp-based synchronization."""
+        # Use regular ROS subscribers instead of message_filters
+        # We'll manually match messages by exact timestamp
         if self.use_mask and self.mask_topic:
-            mask_sub = message_filters.Subscriber(self.mask_topic, Image)
-            self.ts = message_filters.TimeSynchronizer([rgb_sub, depth_sub, info_sub, mask_sub], 10)
-            self.ts.registerCallback(self.image_callback_with_mask)
+            # Subscribe to all topics individually
+            rospy.Subscriber(self.rgb_topic, Image, self._rgb_callback)
+            rospy.Subscriber(self.depth_topic, Image, self._depth_callback)
+            rospy.Subscriber(self.camera_info_topic, CameraInfo, self._info_callback)
+            rospy.Subscriber(self.mask_topic, Image, self._mask_callback)
+            rospy.loginfo("Using manual timestamp-based synchronization (exact matching)")
+            rospy.loginfo(f"Subscribing to RGB: {self.rgb_topic}")
+            rospy.loginfo(f"Subscribing to Depth: {self.depth_topic}")
+            rospy.loginfo(f"Subscribing to CameraInfo: {self.camera_info_topic}")
+            rospy.loginfo(f"Subscribing to Mask: {self.mask_topic}")
+            rospy.logwarn(f"Waiting for mask messages on {self.mask_topic}. Make sure Grounded SAM is running!")
         else:
+            # For non-mask case, use TimeSynchronizer (RGB/depth/info are already synchronized)
+            rgb_sub = message_filters.Subscriber(self.rgb_topic, Image)
+            depth_sub = message_filters.Subscriber(self.depth_topic, Image)
+            info_sub = message_filters.Subscriber(self.camera_info_topic, CameraInfo)
             self.ts = message_filters.TimeSynchronizer([rgb_sub, depth_sub, info_sub], 10)
             self.ts.registerCallback(self.image_callback)
+    
+    # ========================================================================
+    # Manual Synchronization Callbacks
+    # ========================================================================
+    
+    def _rgb_callback(self, rgb_msg):
+        """Store RGB message in buffer and try to match with other messages."""
+        with self.buffer_lock:
+            timestamp = rgb_msg.header.stamp
+            self.rgb_buffer[timestamp] = rgb_msg
+            self._cleanup_old_messages()
+            self._try_match_messages(timestamp)
+        rospy.logdebug(f"[SYNC] RGB message received: {timestamp.secs}.{timestamp.nsecs}")
+    
+    def _depth_callback(self, depth_msg):
+        """Store depth message in buffer and try to match with other messages."""
+        with self.buffer_lock:
+            timestamp = depth_msg.header.stamp
+            self.depth_buffer[timestamp] = depth_msg
+            self._cleanup_old_messages()
+            self._try_match_messages(timestamp)
+    
+    def _info_callback(self, info_msg):
+        """Store camera info message in buffer and try to match with other messages."""
+        with self.buffer_lock:
+            timestamp = info_msg.header.stamp
+            self.info_buffer[timestamp] = info_msg
+            self._cleanup_old_messages()
+            self._try_match_messages(timestamp)
+    
+    def _mask_callback(self, mask_msg):
+        """Store mask message in buffer and try to match with other messages."""
+        with self.buffer_lock:
+            timestamp = mask_msg.header.stamp
+            self.mask_buffer[timestamp] = mask_msg
+            self._cleanup_old_messages()
+            # Masks arrive later, so try matching when mask arrives
+            self._try_match_messages(timestamp)
+        rospy.loginfo(f"[SYNC] Mask message received: {timestamp.secs}.{timestamp.nsecs}")
+    
+    def _cleanup_old_messages(self):
+        """Remove messages older than buffer_max_age."""
+        now = rospy.Time.now()
+        cutoff_time = now - self.buffer_max_age
+        
+        # Clean up each buffer
+        for buffer in [self.rgb_buffer, self.depth_buffer, self.info_buffer, self.mask_buffer]:
+            timestamps_to_remove = [ts for ts in buffer.keys() if ts < cutoff_time]
+            for ts in timestamps_to_remove:
+                del buffer[ts]
+    
+    def _try_match_messages(self, timestamp):
+        """
+        Try to match messages with the given timestamp.
+        If all required messages (RGB, depth, info, mask) are available, process them.
+        """
+        # Check if we have all required messages for this timestamp
+        if timestamp in self.rgb_buffer and timestamp in self.depth_buffer and timestamp in self.info_buffer:
+            if self.use_mask and self.mask_topic:
+                # Need mask too
+                if timestamp in self.mask_buffer:
+                    rospy.loginfo(f"[SYNC] All messages matched for timestamp {timestamp.secs}.{timestamp.nsecs} - processing")
+                    # All messages available - process them
+                    rgb_msg = self.rgb_buffer[timestamp]
+                    depth_msg = self.depth_buffer[timestamp]
+                    info_msg = self.info_buffer[timestamp]
+                    mask_msg = self.mask_buffer[timestamp]
+                    
+                    # Remove from buffers (they've been matched)
+                    del self.rgb_buffer[timestamp]
+                    del self.depth_buffer[timestamp]
+                    del self.info_buffer[timestamp]
+                    del self.mask_buffer[timestamp]
+                    
+                    # Process the matched messages
+                    self.image_callback_with_mask(rgb_msg, depth_msg, info_msg, mask_msg)
+            else:
+                # No mask needed - process without mask
+                rgb_msg = self.rgb_buffer[timestamp]
+                depth_msg = self.depth_buffer[timestamp]
+                info_msg = self.info_buffer[timestamp]
+                
+                # Remove from buffers
+                del self.rgb_buffer[timestamp]
+                del self.depth_buffer[timestamp]
+                del self.info_buffer[timestamp]
+                
+                # Process the matched messages
+                self.image_callback(rgb_msg, depth_msg, info_msg)
     
     # ========================================================================
     # Image Processing
@@ -485,6 +646,26 @@ class FoundationPoseNode:
     def image_callback_with_mask(self, rgb_msg, depth_msg, info_msg, mask_msg):
         """Callback with mask for object segmentation."""
         try:
+            # CRITICAL: Verify timestamps match - RGB, depth, info, and mask must be from the same time
+            # If timestamps don't match, the mask is from a different image and will cause incorrect pose
+            rgb_stamp = rgb_msg.header.stamp
+            depth_stamp = depth_msg.header.stamp
+            info_stamp = info_msg.header.stamp
+            mask_stamp = mask_msg.header.stamp
+            
+            # With manual synchronization, timestamps should already match exactly
+            # But verify as a safety check (allow tiny tolerance for floating-point precision)
+            stamp_diff = abs((rgb_stamp - mask_stamp).to_sec())
+            if stamp_diff > 0.001:  # 1ms tolerance for floating-point precision
+                rospy.logwarn(f"[FOUNDATIONPOSE] Timestamp mismatch in matched messages! RGB: {rgb_stamp.secs}.{rgb_stamp.nsecs}, "
+                            f"Mask: {mask_stamp.secs}.{mask_stamp.nsecs}, diff: {stamp_diff*1000:.3f}ms. This shouldn't happen with manual sync.")
+                return
+            
+            # Also check depth and info timestamps (should match exactly)
+            if abs((rgb_stamp - depth_stamp).to_sec()) > 0.05:
+                rospy.logwarn_throttle(5.0, f"CRITICAL: Depth timestamp mismatch! RGB: {rgb_stamp.secs}.{rgb_stamp.nsecs}, "
+                                          f"Depth: {depth_stamp.secs}.{depth_stamp.nsecs}, diff: {abs((rgb_stamp - depth_stamp).to_sec())*1000:.1f}ms.")
+            
             # Extract camera matrix
             if self.camera_K is None:
                 self.camera_K = self.extract_camera_matrix(info_msg)
@@ -495,16 +676,464 @@ class FoundationPoseNode:
             depth_image = self.ros_image_to_numpy(depth_msg, desired_encoding='32FC1')
             mask_image = self.ros_image_to_numpy(mask_msg, desired_encoding='mono8')
             
+            # Verify mask dimensions match RGB image
+            if mask_image.shape[:2] != rgb_image.shape[:2]:
+                rospy.logwarn_throttle(5.0, f"CRITICAL: Mask size mismatch! RGB: {rgb_image.shape[:2]}, Mask: {mask_image.shape[:2]}. "
+                                          f"Skipping pose estimation.")
+                return
+            
             # Convert mask to boolean
             ob_mask = mask_image.astype(bool)
             
-            # Process pose estimation with mask
-            self.process_pose_estimation(rgb_image, depth_image, rgb_msg.header, ob_mask=ob_mask)
+            # CRITICAL: Check if mask is actually empty BEFORE further processing
+            mask_pixels = ob_mask.sum() if ob_mask is not None else 0
+            if mask_pixels == 0:
+                rospy.logwarn_throttle(5.0, f"[FOUNDATIONPOSE] Empty mask detected! RGB: {rgb_stamp.secs}.{rgb_stamp.nsecs}, "
+                                          f"Mask: {mask_stamp.secs}.{mask_stamp.nsecs}, diff: {abs((rgb_stamp - mask_stamp).to_sec())*1000:.1f}ms. "
+                                          f"This mask is likely from a different frame or no detection. Skipping.")
+                return  # Skip if mask is completely empty
+            
+            # Log timestamp info for debugging
+            # rospy.loginfo_throttle(2.0, f"[SYNC] Received synchronized images: RGB={rgb_stamp.secs}.{rgb_stamp.nsecs}, "
+            #               f"Depth={depth_stamp.secs}.{depth_stamp.nsecs}, Mask={mask_stamp.secs}.{mask_stamp.nsecs}, "
+            #               f"RGB-Mask diff: {abs((rgb_stamp - mask_stamp).to_sec())*1000:.1f}ms")
+            
+            # Process pose estimation with mask (use RGB header as it's the primary timestamp)
+            
+            # Validate mask size BEFORE submitting to thread pool (avoid unnecessary task creation)
+            if ob_mask is not None:
+                H, W = ob_mask.shape[:2]
+                min_mask_pixels = max(500, int(W * H * 0.005))  # At least 500 pixels or 0.5% of image
+                if mask_pixels < min_mask_pixels:
+                    rospy.logwarn(f"[FOUNDATIONPOSE] Mask too small ({mask_pixels} pixels < {min_mask_pixels}), skipping submission")
+                    return
+                else:
+                    rospy.loginfo(f"[FOUNDATIONPOSE] Valid mask: {mask_pixels} pixels (required: {min_mask_pixels})")
+            
+            # Check if image is too stale (skip if >2 seconds old to avoid processing outdated frames)
+            time_since_image = (rospy.Time.now() - rgb_msg.header.stamp).to_sec()
+            if time_since_image > 2.0:
+                rospy.logwarn(f"[FOUNDATIONPOSE] Skipping stale image ({time_since_image:.1f}s old)")
+                return
+            
+            # Check number of active poses (limit to prevent GPU memory issues)
+            with self.pose_lock:
+                active_count = len([f for f in self.active_poses.values() if not f.done()])
+                # Allow queuing up to 1.5x max_workers to keep pipeline full
+                max_queue_size = int(self.max_parallel_workers * 1.5)
+                if active_count >= max_queue_size:
+                    rospy.logwarn(f"[FOUNDATIONPOSE] Queue full ({active_count}/{max_queue_size}), skipping frame")
+                    return
+            
+            # Log active worker count before submission
+            rospy.loginfo(f"[FOUNDATIONPOSE] ✓ Submitting task (active before: {active_count}/{self.max_parallel_workers}, max_queue: {max_queue_size})")
+            
+            # Submit pose estimation to thread pool (non-blocking)
+            # Make deep copies to avoid race conditions with shared numpy arrays
+            rgb_copy = rgb_image.copy()
+            depth_copy = depth_image.copy()
+            mask_copy = ob_mask.copy() if ob_mask is not None else None
+            header_copy = deepcopy(rgb_msg.header)
+            
+            future = self.pose_executor.submit(
+                self._process_pose_estimation_async,
+                rgb_copy,
+                depth_copy,
+                header_copy,
+                mask_copy
+            )
+            
+            # Store future with timestamp for tracking (update active_count after adding)
+            with self.pose_lock:
+                self.active_poses[rgb_msg.header.stamp] = future
+                active_count_after = len([f for f in self.active_poses.values() if not f.done()])
+            
+            # Log immediately after submission
+            rospy.loginfo(f"[FOUNDATIONPOSE] ✓ Submitted task (active: {active_count_after}/{self.max_parallel_workers})")
+            
+            # Clean up completed futures periodically (but don't do it every time to reduce lock contention)
+            if not hasattr(self, '_last_cleanup_time'):
+                self._last_cleanup_time = 0
+            current_time = rospy.get_time()
+            if current_time - self._last_cleanup_time >= 0.5:  # Cleanup every 0.5 seconds
+                self._cleanup_completed_futures()
+                self._last_cleanup_time = current_time
             
         except Exception as e:
             rospy.logerr(f"Error in image_callback_with_mask: {e}")
             import traceback
             rospy.logerr(traceback.format_exc())
+    
+    # ========================================================================
+    # Performance Monitoring
+    # ========================================================================
+    
+    def get_gpu_usage(self):
+        """Get GPU memory and utilization usage."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = torch.cuda.current_device()
+                # Memory usage
+                memory_allocated = torch.cuda.memory_allocated(device) / 1024**3  # GB
+                memory_reserved = torch.cuda.memory_reserved(device) / 1024**3  # GB
+                memory_total = torch.cuda.get_device_properties(device).total_memory / 1024**3  # GB
+                memory_allocated_pct = (memory_allocated / memory_total) * 100
+                memory_reserved_pct = (memory_reserved / memory_total) * 100
+                
+                # Try to get utilization using pynvml if available
+                gpu_util = None
+                if self.pynvml_initialized:
+                    try:
+                        import pynvml
+                        handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+                        util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                        gpu_util = util.gpu
+                    except Exception:
+                        # pynvml failed, that's okay
+                        pass
+                
+                return {
+                    'memory_allocated_gb': memory_allocated,
+                    'memory_reserved_gb': memory_reserved,
+                    'memory_total_gb': memory_total,
+                    'memory_allocated_pct': memory_allocated_pct,
+                    'memory_reserved_pct': memory_reserved_pct,
+                    'gpu_util_pct': gpu_util
+                }
+        except Exception:
+            pass
+        return None
+    
+    def get_cpu_usage(self):
+        """Get CPU usage percentage."""
+        if PSUTIL_AVAILABLE:
+            try:
+                # Get CPU usage for current process
+                process = psutil.Process(os.getpid())
+                cpu_percent = process.cpu_percent(interval=0.1)
+                # Get system-wide CPU usage
+                cpu_system = psutil.cpu_percent(interval=0.1)
+                # Get memory usage
+                memory_info = process.memory_info()
+                memory_mb = memory_info.rss / 1024 / 1024  # MB
+                return {
+                    'cpu_percent': cpu_percent,
+                    'cpu_system': cpu_system,
+                    'memory_mb': memory_mb
+                }
+            except Exception:
+                pass
+        return None
+    
+    def _save_metrics(self, elapsed_time, gpu_info, cpu_info):
+        """Save performance metrics to JSON file."""
+        try:
+            import json
+            import rospy
+            
+            metric_entry = {
+                'timestamp': rospy.get_time(),
+                'time_ms': elapsed_time * 1000.0,
+                'time_s': elapsed_time
+            }
+            
+            if gpu_info:
+                metric_entry.update({
+                    'gpu_memory_allocated_gb': gpu_info.get('memory_allocated_gb', 0),
+                    'gpu_memory_reserved_gb': gpu_info.get('memory_reserved_gb', 0),
+                    'gpu_memory_total_gb': gpu_info.get('memory_total_gb', 0),
+                    'gpu_memory_allocated_pct': gpu_info.get('memory_allocated_pct', 0),
+                    'gpu_memory_reserved_pct': gpu_info.get('memory_reserved_pct', 0),
+                    'gpu_utilization_pct': gpu_info.get('gpu_util_pct', 0) if gpu_info.get('gpu_util_pct') is not None else 0
+                })
+            
+            if cpu_info:
+                metric_entry.update({
+                    'cpu_process_pct': cpu_info.get('cpu_percent', 0),
+                    'cpu_system_pct': cpu_info.get('cpu_system', 0),
+                    'memory_mb': cpu_info.get('memory_mb', 0)
+                })
+            
+            with self.pose_lock:
+                self.metrics_data.append(metric_entry)
+                
+                # Save to file periodically (every 10 entries to reduce I/O)
+                if len(self.metrics_data) % 10 == 0:
+                    with open(self.metrics_file, 'w') as f:
+                        json.dump(self.metrics_data, f, indent=2)
+        except Exception as e:
+            rospy.logwarn(f"Failed to save metrics: {e}")
+    
+    def print_performance_metrics(self, elapsed_time, gpu_info, cpu_info, estimation_type="FoundationPose Pose Estimation"):
+        """Print performance metrics in a formatted way."""
+        rospy.loginfo("=" * 80)
+        rospy.loginfo(f"PERFORMANCE METRICS - {estimation_type.upper()}")
+        rospy.loginfo("=" * 80)
+        rospy.loginfo(f"⏱️  Time: {elapsed_time*1000:.2f} ms ({elapsed_time:.3f} s)")
+        
+        if gpu_info:
+            rospy.loginfo(f"🎮 GPU Memory: {gpu_info['memory_allocated_gb']:.2f} GB / {gpu_info['memory_total_gb']:.2f} GB ({gpu_info['memory_allocated_pct']:.1f}%)")
+            rospy.loginfo(f"🎮 GPU Reserved: {gpu_info['memory_reserved_gb']:.2f} GB ({gpu_info['memory_reserved_pct']:.1f}%)")
+            if gpu_info['gpu_util_pct'] is not None:
+                rospy.loginfo(f"🎮 GPU Utilization: {gpu_info['gpu_util_pct']:.1f}%")
+        
+        if cpu_info:
+            rospy.loginfo(f"💻 CPU (Process): {cpu_info['cpu_percent']:.1f}%")
+            rospy.loginfo(f"💻 CPU (System): {cpu_info['cpu_system']:.1f}%")
+            rospy.loginfo(f"💻 Memory (Process): {cpu_info['memory_mb']:.1f} MB")
+        
+        rospy.loginfo("=" * 80)
+    
+    # ========================================================================
+    # Parallel Processing Helpers
+    # ========================================================================
+    
+    def _cleanup_completed_futures(self):
+        """Remove completed futures from active_poses dictionary."""
+        with self.pose_lock:
+            completed = [stamp for stamp, future in self.active_poses.items() if future.done()]
+            for stamp in completed:
+                del self.active_poses[stamp]
+            
+            # Log active worker count when tasks complete (throttled)
+            active_count = len([f for f in self.active_poses.values() if not f.done()])
+            if not hasattr(self, '_last_completion_log_time'):
+                self._last_completion_log_time = 0
+            current_time = rospy.get_time()
+            if current_time - self._last_completion_log_time >= 1.0:  # Log every 1 second on completion
+                if len(completed) > 0 or active_count > 0:  # Only log if there's activity
+                    rospy.loginfo(f"[FOUNDATIONPOSE] Active workers: {active_count}/{self.max_parallel_workers} (completed: {len(completed)}, queue: {active_count})")
+                    self._last_completion_log_time = current_time
+    
+    def _process_pose_estimation_async(self, rgb_image, depth_image, header, ob_mask=None):
+        """
+        Thread-safe async version of process_pose_estimation.
+        This runs in a worker thread and handles pose estimation without blocking the main callback.
+        
+        Args:
+            rgb_image: RGB image as numpy array (already copied)
+            depth_image: Depth image as numpy array (already copied)
+            header: ROS message header (already deep copied)
+            ob_mask: Optional object mask (already copied)
+        """
+        try:
+            # Use the existing process_pose_estimation logic but ensure thread safety
+            if self.camera_K is None:
+                rospy.logwarn("[FOUNDATIONPOSE] [ASYNC] Camera matrix not available yet")
+                return
+            
+            # Convert depth to meters if needed
+            if depth_image.dtype != np.float32:
+                depth_image = depth_image.astype(np.float32)
+            else:
+                depth_image = depth_image.copy()
+            
+            # Validate and clean depth image
+            invalid_mask = (depth_image < 0.001) | (depth_image >= self.depth_max)
+            depth_image[invalid_mask] = 0.0
+            
+            # Validate mask
+            if ob_mask is None:
+                valid_depth = (depth_image > self.depth_min) & (depth_image < self.depth_max) & (depth_image >= 0.001)
+                ob_mask = valid_depth.astype(bool)
+                mask_pixels = ob_mask.sum()
+                H, W = depth_image.shape[:2]
+                min_mask_pixels = max(500, int(W * H * 0.005))
+                if mask_pixels < min_mask_pixels:
+                    rospy.logwarn_throttle(5.0, f"[FOUNDATIONPOSE] Mask too small ({mask_pixels} pixels < {min_mask_pixels}). Skipping.")
+                    return
+            else:
+                if ob_mask.dtype != bool:
+                    ob_mask = ob_mask.astype(bool)
+                mask_pixels = ob_mask.sum()
+                H, W = ob_mask.shape[:2]
+                min_mask_pixels = max(500, int(W * H * 0.005))
+                if mask_pixels < min_mask_pixels:
+                    rospy.logwarn_throttle(2.0, f"[FOUNDATIONPOSE] Mask too small ({mask_pixels} pixels < {min_mask_pixels}). Skipping.")
+                    return
+                # else:
+                #     rospy.loginfo(f"[FOUNDATIONPOSE] Valid mask: {mask_pixels} pixels (required: {min_mask_pixels})")
+            
+            # Clear CUDA cache before pose registration
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            
+            # rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] Performing pose registration... (mask pixels: {ob_mask.sum() if ob_mask is not None else 'N/A'})")
+            
+            # Get initial resource usage
+            gpu_info_before = self.get_gpu_usage()
+            cpu_info_before = self.get_cpu_usage()
+            
+            # Start timing
+            start_time = time.time()
+            
+            try:
+                image_timestamp = header.stamp
+                processing_start_time = rospy.Time.now()
+                time_since_image = (processing_start_time - image_timestamp).to_sec()
+                if time_since_image > 0.1:
+                    rospy.logdebug(f"[FOUNDATIONPOSE] [ASYNC] Processing image from {time_since_image*1000:.1f}ms ago")
+                
+                # Try running without lock - PyTorch CUDA operations are generally thread-safe
+                # If we get CUDA errors, we can add the lock back
+                active_before_gpu = len([f for f in self.active_poses.values() if not f.done()])
+                rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] Starting registration (active: {active_before_gpu}/{self.max_parallel_workers})")
+                pose = self.estimator.register(
+                    K=self.camera_K,
+                    rgb=rgb_image,
+                    depth=depth_image,
+                    ob_mask=ob_mask,
+                    iteration=self.est_refine_iter
+                )
+                active_after_gpu = len([f for f in self.active_poses.values() if not f.done()])
+                rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] ✓ Registration completed (active: {active_after_gpu}/{self.max_parallel_workers})")
+                
+                # Log registration result
+                if pose is None:
+                    rospy.logwarn("[FOUNDATIONPOSE] [ASYNC] Registration returned None - pose estimation failed")
+                    return
+                # else:
+                #     pose_pos = pose[:3, 3]
+                #     rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] Registration successful! Pose position: ({pose_pos[0]:.3f}, {pose_pos[1]:.3f}, {pose_pos[2]:.3f})")
+                
+                # End timing
+                elapsed_time = time.time() - start_time
+                processing_end_time = rospy.Time.now()
+                total_delay = (processing_end_time - image_timestamp).to_sec()
+                
+                # Get resource usage after estimation
+                gpu_info_after = self.get_gpu_usage()
+                cpu_info_after = self.get_cpu_usage()
+                
+                # Use after values for reporting
+                gpu_info = gpu_info_after if gpu_info_after else gpu_info_before
+                cpu_info = cpu_info_after if cpu_info_after else cpu_info_before
+                
+                # Print performance metrics (throttled)
+                current_time = rospy.get_time()
+                estimation_type = "FoundationPose Pose Estimation [ASYNC]"
+                if current_time - self._last_performance_print_time >= self.COMPARISON_PRINT_INTERVAL:
+                    self.print_performance_metrics(elapsed_time, gpu_info, cpu_info, estimation_type)
+                    self._last_performance_print_time = current_time
+                else:
+                    rospy.logdebug(f"{estimation_type}: {elapsed_time*1000:.1f} ms")
+                
+                # Save metrics to file
+                self._save_metrics(elapsed_time, gpu_info, cpu_info)
+                
+                # Validate pose position before processing
+                pose_position = pose[:3, 3]
+                pose_depth = pose_position[2]
+                
+                # Check if pose is at or near camera origin
+                if np.linalg.norm(pose_position) < 0.05:
+                    rospy.logwarn_throttle(5.0, f"[FOUNDATIONPOSE] [ASYNC] Pose at camera origin, skipping.")
+                    return
+                
+                # Check if depth is reasonable
+                if pose_depth < 0.1 or pose_depth > 5.0:
+                    rospy.logwarn_throttle(5.0, f"[FOUNDATIONPOSE] [ASYNC] Unreasonable depth ({pose_depth:.3f}m), skipping.")
+                    return
+                
+                # Apply to_origin transformation
+                pose_corrected = pose.copy()
+                if hasattr(self, 'to_origin') and self.to_origin is not None:
+                    try:
+                        pose_corrected = pose @ np.linalg.inv(self.to_origin)
+                    except Exception as e:
+                        rospy.logwarn(f"[FOUNDATIONPOSE] [ASYNC] Failed to apply to_origin transform: {e}")
+                        return
+                
+                # Thread-safe: Add pose to buffer and publish
+                with self.pose_lock:
+                    # Add to circular buffer
+                    self._add_pose_to_buffer(pose_corrected.copy(), deepcopy(header))
+                    
+                    # Get consensus pose from buffer
+                    consensus_result = self._get_consensus_pose()
+                    
+                    # Use consensus pose if available, otherwise use latest
+                    if consensus_result is not None:
+                        consensus_pose, consensus_header, consensus_count = consensus_result
+                        pose_to_publish = consensus_pose
+                        header_to_use = consensus_header
+                    elif len(self.pose_buffer) > 0:
+                        latest_pose, latest_header = self.pose_buffer[-1]
+                        pose_to_publish = latest_pose.copy()
+                        header_to_use = latest_header
+                    else:
+                        pose_to_publish = pose_corrected
+                        header_to_use = header
+                    
+                    # Check pose quality before publishing
+                    quality_check = self._check_pose_quality(pose_to_publish)
+                    if quality_check is not None:
+                        pos_error, orient_error = quality_check
+                        if pos_error <= self.publish_position_error_threshold and orient_error <= self.publish_orientation_error_threshold:
+                            if self._check_temporal_consistency(pose_to_publish):
+                                pose_pos = pose_to_publish[:3, 3]
+                                # rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] ✓ PUBLISHING POSE - Camera frame: ({pose_pos[0]:.3f}, {pose_pos[1]:.3f}, {pose_pos[2]:.3f})m")
+                                self.publish_pose(pose_to_publish, header_to_use)
+                                self.publish_markers(pose_to_publish, header_to_use)
+                                self.last_published_pose = pose_to_publish.copy()
+                                self.last_published_time = rospy.get_time()
+                                # if consensus_result is not None:
+                                #     rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] ✓ Published consensus pose: consensus={consensus_count}/{len(self.pose_buffer)}")
+                                # else:
+                                #     rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] ✓ Published latest pose (no consensus)")
+                    else:
+                        # No ground truth available - apply strict validation
+                        if self._validate_pose_without_gt(pose_to_publish):
+                            pose_pos = pose_to_publish[:3, 3]
+                            # rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] ✓ PUBLISHING POSE (no GT) - Camera frame: ({pose_pos[0]:.3f}, {pose_pos[1]:.3f}, {pose_pos[2]:.3f})m")
+                            self.publish_pose(pose_to_publish, header_to_use)
+                            self.publish_markers(pose_to_publish, header_to_use)
+                            self.last_published_pose = pose_to_publish.copy()
+                            self.last_published_time = rospy.get_time()
+                            # if consensus_result is not None:
+                            #     rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] ✓ Published consensus pose (no GT): consensus={consensus_count}/{len(self.pose_buffer)}")
+                            # else:
+                            #     rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] ✓ Published latest pose (no consensus, no GT)")
+                    
+                    # Always compare with ground truth for logging
+                    self.compare_with_ground_truth(pose_corrected, header)
+                
+            except Exception as e:
+                elapsed_time = time.time() - start_time if 'start_time' in locals() else 0
+                rospy.logerr(f"[FOUNDATIONPOSE] [ASYNC] Pose registration failed (took {elapsed_time*1000:.1f} ms): {e}")
+                import traceback
+                rospy.logerr(traceback.format_exc())
+                # Aggressive memory cleanup after failure
+                try:
+                    import torch
+                    import gc
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        rospy.loginfo("[FOUNDATIONPOSE] [ASYNC] Performed aggressive CUDA memory cleanup")
+                except Exception:
+                    pass
+                return  # Skip this frame, try again next time
+        
+        except Exception as e:
+            rospy.logerr(f"[FOUNDATIONPOSE] [ASYNC] Error in async pose estimation: {e}")
+            import traceback
+            rospy.logerr(traceback.format_exc())
+        finally:
+            # Clean up completed future
+            with self.pose_lock:
+                if header.stamp in self.active_poses:
+                    del self.active_poses[header.stamp]
+                remaining_active = len([f for f in self.active_poses.values() if not f.done()])
+                rospy.loginfo(f"[FOUNDATIONPOSE] [ASYNC] Task completed, remaining active: {remaining_active}/{self.max_parallel_workers}")
     
     # ========================================================================
     # Pose Estimation
@@ -546,17 +1175,30 @@ class FoundationPoseNode:
                 valid_depth = (depth_image > self.depth_min) & (depth_image < self.depth_max) & (depth_image >= 0.001)
                 ob_mask = valid_depth.astype(bool)
                 
-                # Validate mask has sufficient pixels
-                if ob_mask.sum() < 4:
-                    rospy.logwarn_throttle(5.0, f"Mask too small ({ob_mask.sum()} pixels). Depth range may be incorrect or object not visible.")
+                # Validate mask has sufficient pixels (object must be visible)
+                # Stricter to reduce false positives
+                mask_pixels = ob_mask.sum()
+                H, W = depth_image.shape[:2]
+                min_mask_pixels = max(500, int(W * H * 0.005))  # At least 500 pixels or 0.5% of image (stricter)
+                if mask_pixels < min_mask_pixels:
+                    rospy.logwarn_throttle(5.0, f"Mask too small ({mask_pixels} pixels < {min_mask_pixels}). Object not visible, skipping pose estimation.")
+                    return  # Don't attempt pose estimation if mask is invalid
                 else:
                     rospy.logwarn_once(f"No mask provided, using depth-based heuristic (depth: {self.depth_min}-{self.depth_max}m, {ob_mask.sum()} pixels). Consider using proper segmentation.")
             else:
-                # Validate provided mask
+                # Validate provided mask (object must be visible)
                 if ob_mask.dtype != bool:
                     ob_mask = ob_mask.astype(bool)
-                if ob_mask.sum() < 4:
-                    rospy.logwarn_throttle(5.0, f"Provided mask too small ({ob_mask.sum()} pixels). Pose estimation may fail.")
+                # Stricter to reduce false positives
+                mask_pixels = ob_mask.sum()
+                # Estimate image size from mask shape
+                H, W = ob_mask.shape[:2]
+                min_mask_pixels = max(500, int(W * H * 0.005))  # At least 500 pixels or 0.5% of image (stricter)
+                if mask_pixels < min_mask_pixels:
+                    rospy.logwarn_throttle(2.0, f"[FOUNDATIONPOSE] Mask too small ({mask_pixels} pixels < {min_mask_pixels} required). Skipping pose estimation.")
+                    return  # Don't attempt pose estimation if mask is invalid
+                # else:
+                #     rospy.loginfo(f"[FOUNDATIONPOSE] Valid mask: {mask_pixels} pixels (required: {min_mask_pixels}, {mask_pixels/min_mask_pixels:.1f}x threshold)")
             
             # Estimate pose
             # Clear CUDA cache before pose registration to reduce memory fragmentation
@@ -567,9 +1209,25 @@ class FoundationPoseNode:
             except Exception:
                 pass  # Ignore if torch not available
             
-            # Always perform registration (tracking disabled for now)
-            rospy.loginfo("Performing pose registration...")
+            # Always perform registration (tracking disabled)
+            # rospy.loginfo(f"[FOUNDATIONPOSE] Performing pose registration... (mask pixels: {ob_mask.sum() if ob_mask is not None else 'N/A'})")
+            
+            # Get initial resource usage
+            gpu_info_before = self.get_gpu_usage()
+            cpu_info_before = self.get_cpu_usage()
+            
+            # Start timing
+            start_time = time.time()
+            
             try:
+                # Log image timestamp for debugging
+                image_timestamp = header.stamp
+                processing_start_time = rospy.Time.now()
+                time_since_image = (processing_start_time - image_timestamp).to_sec()
+                if time_since_image > 0.1:
+                    rospy.logdebug(f"FoundationPose: Processing image from {time_since_image*1000:.1f}ms ago "
+                                  f"(image: {image_timestamp.secs}.{image_timestamp.nsecs}, now: {processing_start_time.secs}.{processing_start_time.nsecs})")
+                
                 pose = self.estimator.register(
                     K=self.camera_K,
                     rgb=rgb_image,
@@ -577,10 +1235,45 @@ class FoundationPoseNode:
                     ob_mask=ob_mask,
                     iteration=self.est_refine_iter
                 )
+                
+                # Log registration result
+                if pose is None:
+                    rospy.logwarn("[FOUNDATIONPOSE] Registration returned None - pose estimation failed")
+                else:
+                    pose_pos = pose[:3, 3]
+                    # rospy.loginfo(f"[FOUNDATIONPOSE] Registration successful! Pose position in camera frame: ({pose_pos[0]:.3f}, {pose_pos[1]:.3f}, {pose_pos[2]:.3f})")
+                
+                # End timing
+                elapsed_time = time.time() - start_time
+                processing_end_time = rospy.Time.now()
+                total_delay = (processing_end_time - image_timestamp).to_sec()
+                if total_delay > 0.2:
+                    rospy.logwarn_throttle(2.0, f"FoundationPose processing took {elapsed_time*1000:.1f}ms, "
+                                              f"total delay from image capture: {total_delay*1000:.1f}ms. "
+                                              f"Robot may have moved during processing.")
+                
+                # Get resource usage after estimation
+                gpu_info_after = self.get_gpu_usage()
+                cpu_info_after = self.get_cpu_usage()
+                
+                # Use after values for reporting (they represent peak usage during computation)
+                gpu_info = gpu_info_after if gpu_info_after else gpu_info_before
+                cpu_info = cpu_info_after if cpu_info_after else cpu_info_before
+                
+                # Print performance metrics (throttled to match pose comparison interval)
+                current_time = rospy.get_time()
+                estimation_type = "FoundationPose Pose Estimation"
+                if current_time - self._last_performance_print_time >= self.COMPARISON_PRINT_INTERVAL:
+                    self.print_performance_metrics(elapsed_time, gpu_info, cpu_info, estimation_type)
+                    self._last_performance_print_time = current_time
+                else:
+                    rospy.logdebug(f"{estimation_type}: {elapsed_time*1000:.1f} ms")
+                
                 self.pose_initialized = True
                 rospy.loginfo("Pose registration successful")
             except Exception as e:
-                rospy.logerr(f"Pose registration failed: {e}")
+                elapsed_time = time.time() - start_time
+                rospy.logerr(f"Pose registration failed (took {elapsed_time*1000:.1f} ms): {e}")
                 # Aggressive memory cleanup after failure
                 try:
                     import torch
@@ -602,7 +1295,33 @@ class FoundationPoseNode:
                 return  # Skip this frame, try again next time
             
             # If we reach here, pose was successfully assigned
-            self.last_pose = pose
+            # Only proceed if pose is valid (not None)
+            if pose is None:
+                rospy.logwarn_throttle(2.0, "Pose estimation returned None, skipping publication.")
+                return
+            
+            # Don't store last_pose - always use latest detection only
+            # self.last_pose = pose  # Removed to prevent republishing old poses
+            
+            # CRITICAL: Validate pose position before processing
+            # FoundationPose should return a pose with reasonable position (not at camera origin)
+            pose_position = pose[:3, 3]
+            pose_depth = pose_position[2]  # Z coordinate in camera frame (forward)
+            
+            # Check if pose is at or near camera origin (this would cause it to appear at robot head)
+            if np.linalg.norm(pose_position) < 0.05:  # Less than 5cm from origin
+                rospy.logwarn_throttle(5.0, f"CRITICAL: Pose position is at/near camera origin ({pose_position[0]:.4f}, {pose_position[1]:.4f}, {pose_position[2]:.4f}). "
+                                          f"This will cause pose to appear at robot head. Skipping pose estimation.")
+                return  # Skip this pose - it's invalid
+            
+            # Check if depth is reasonable (object should be in front of camera, not too close/far)
+            if pose_depth < 0.1 or pose_depth > 5.0:
+                rospy.logwarn_throttle(5.0, f"CRITICAL: Pose depth is unreasonable ({pose_depth:.3f}m). "
+                                          f"Object should be between 0.1m and 5.0m from camera. Skipping pose estimation.")
+                return  # Skip this pose - depth is invalid
+            
+            # Log pose position for debugging
+            rospy.logdebug(f"FoundationPose returned pose in camera frame: pos=({pose_position[0]:.3f}, {pose_position[1]:.3f}, {pose_position[2]:.3f}), depth={pose_depth:.3f}m")
             
             # Apply to_origin transformation to match run_demo.py behavior
             # FoundationPose returns pose in centered mesh coordinate system (center at origin)
@@ -611,6 +1330,13 @@ class FoundationPoseNode:
             # Note: to_origin moves the center of the bounding box to the origin, so inv(to_origin) moves origin back to center
             # The pose position should already be at the center (origin in centered frame)
             pose_corrected = pose @ np.linalg.inv(self.to_origin)
+            
+            # Validate pose after correction too
+            pose_corrected_position = pose_corrected[:3, 3]
+            pose_corrected_depth = pose_corrected_position[2]
+            if np.linalg.norm(pose_corrected_position) < 0.05:
+                rospy.logwarn_throttle(5.0, f"CRITICAL: Pose position after correction is at/near origin ({pose_corrected_position[0]:.4f}, {pose_corrected_position[1]:.4f}, {pose_corrected_position[2]:.4f}). Skipping.")
+                return
             
             # Debug: Log the to_origin translation to understand the center offset
             if self.debug >= 2 and not hasattr(self, '_to_origin_translation_logged'):
@@ -691,7 +1417,6 @@ class FoundationPoseNode:
                 vis = draw_xyz_axis(vis_rgb, ob_in_cam=pose_corrected, scale=0.1, K=self.camera_K, thickness=3, transparency=0, is_input_rgb=True)
                 
                 # Save the visualization image in RGB format
-                import time
                 timestamp = int(time.time() * 1000)  # Use timestamp as filename
                 image_path = os.path.join(self.debug_dir, f'{timestamp}.png')
                 imageio.imwrite(image_path, vis)
@@ -715,27 +1440,73 @@ class FoundationPoseNode:
                     rospy.loginfo("="*60)
                     self._orientation_debug_logged = True
             
+            # Add pose to circular buffer for consensus voting (with header for timestamp)
+            self._add_pose_to_buffer(pose_corrected, header)
+            
+            # Get consensus pose from buffer (returns pose and header)
+            consensus_result = self._get_consensus_pose()
+            
+            # Use consensus pose if available, otherwise use latest pose from buffer
+            if consensus_result is not None:
+                consensus_pose, consensus_header, consensus_count = consensus_result
+                pose_to_publish = consensus_pose
+                header_to_use = consensus_header  # Use header from consensus (timestamp from latest pose in cluster)
+            elif len(self.pose_buffer) > 0:
+                # No consensus, use latest pose (most recent in buffer)
+                latest_pose, latest_header = self.pose_buffer[-1]
+                pose_to_publish = latest_pose.copy()
+                header_to_use = latest_header  # Use header from latest pose
+            else:
+                # Buffer is empty (shouldn't happen), use current pose
+                pose_to_publish = pose_corrected
+                header_to_use = header  # Use current header
+            
             # Check pose quality before publishing (only publish if error is acceptable)
-            quality_check = self._check_pose_quality(pose_corrected)
+            quality_check = self._check_pose_quality(pose_to_publish)
             if quality_check is not None:
                 pos_error, orient_error = quality_check
                 if pos_error <= self.publish_position_error_threshold and orient_error <= self.publish_orientation_error_threshold:
-                    # Quality is good, publish pose
-                    self.publish_pose(pose_corrected, header)
-                    self.publish_markers(pose_corrected, header)
-                    rospy.loginfo_throttle(5.0, f"Publishing pose: pos_error={pos_error:.4f}m (threshold={self.publish_position_error_threshold:.4f}m), "
-                                                f"orient_error={orient_error:.2f}° (threshold={self.publish_orientation_error_threshold:.2f}°)")
+                    # Quality is good, but also check temporal consistency
+                    if self._check_temporal_consistency(pose_to_publish):
+                        # CRITICAL: Use the correct header (with timestamp from when pose was captured)
+                        pose_pos = pose_to_publish[:3, 3]
+                        # rospy.loginfo(f"[FOUNDATIONPOSE] ✓ PUBLISHING POSE - Camera frame: ({pose_pos[0]:.3f}, {pose_pos[1]:.3f}, {pose_pos[2]:.3f})m")
+                        self.publish_pose(pose_to_publish, header_to_use)
+                        self.publish_markers(pose_to_publish, header_to_use)
+                        # Update last published pose
+                        self.last_published_pose = pose_to_publish.copy()
+                        self.last_published_time = rospy.get_time()
+                        # if consensus_result is not None:
+                        #     rospy.loginfo(f"[FOUNDATIONPOSE] ✓ Published consensus pose: pos_error={pos_error:.4f}m, orient_error={orient_error:.2f}°, consensus={consensus_count}/{len(self.pose_buffer)}")
+                        # else:
+                        #     rospy.loginfo(f"[FOUNDATIONPOSE] ✓ Published latest pose (no consensus): pos_error={pos_error:.4f}m, orient_error={orient_error:.2f}°")
+                    else:
+                        rospy.logwarn_throttle(2.0, f"Pose quality good but failed temporal consistency check. Not publishing.")
                 else:
                     # Quality is not good enough, don't publish
                     rospy.logwarn_throttle(2.0, f"NOT publishing pose (quality too low): pos_error={pos_error:.4f}m (threshold={self.publish_position_error_threshold:.4f}m), "
                                                 f"orient_error={orient_error:.2f}° (threshold={self.publish_orientation_error_threshold:.2f}°)")
-            else:
-                # No ground truth available, publish anyway (for initial setup)
-                if not hasattr(self, '_no_gt_publish_warning_logged'):
-                    rospy.logwarn("No ground truth available. Publishing pose without quality check.")
-                    self._no_gt_publish_warning_logged = True
-                self.publish_pose(pose_corrected, header)
-                self.publish_markers(pose_corrected, header)
+            else:  # No ground truth available
+                # No ground truth available - apply strict validation before publishing
+                # Check temporal consistency and position sanity
+                if self._validate_pose_without_gt(pose_to_publish):
+                    if not hasattr(self, '_no_gt_publish_warning_logged'):
+                        rospy.logwarn("No ground truth available. Publishing pose with strict validation.")
+                        self._no_gt_publish_warning_logged = True
+                    # CRITICAL: Use the correct header (with timestamp from when pose was captured)
+                    pose_pos = pose_to_publish[:3, 3]
+                    # rospy.loginfo(f"[FOUNDATIONPOSE] ✓ PUBLISHING POSE (no GT) - Camera frame: ({pose_pos[0]:.3f}, {pose_pos[1]:.3f}, {pose_pos[2]:.3f})m")
+                    self.publish_pose(pose_to_publish, header_to_use)
+                    self.publish_markers(pose_to_publish, header_to_use)
+                    # Update last published pose
+                    self.last_published_pose = pose_to_publish.copy()
+                    self.last_published_time = rospy.get_time()
+                    # if consensus_result is not None:
+                    #     rospy.loginfo(f"[FOUNDATIONPOSE] ✓ Published consensus pose (no GT): consensus={consensus_count}/{len(self.pose_buffer)}")
+                    # else:
+                    #     rospy.loginfo(f"[FOUNDATIONPOSE] ✓ Published latest pose (no consensus, no GT): buffer_size={len(self.pose_buffer)}")
+                else:
+                    rospy.logwarn_throttle(2.0, "Pose validation failed (no GT). Not publishing.")
             
             # Always compare with ground truth for logging/debugging
             self.compare_with_ground_truth(pose_corrected, header)
@@ -771,14 +1542,44 @@ class FoundationPoseNode:
         quat = rot.as_quat()  # [x, y, z, w]
         
         # Transform pose from camera frame to odom frame for visualization
-        # Use the same helper method as publish_markers() for consistency
-        pose_msg = self._transform_pose_with_fallback('odom', pose_msg_camera, timeout=0.1)
+        # CRITICAL: Use strict_timestamp=True to ensure we use the exact transform from when image was captured
+        # This prevents robot movement from affecting the pose calculation
+        # The pose is calculated in camera frame at image capture time T1
+        # We MUST use the robot position at T1, not the current position
+        image_timestamp = header.stamp
+        current_time = rospy.Time.now()
+        time_diff = (current_time - image_timestamp).to_sec()
+        
+        if time_diff > 0.1:  # If processing took more than 100ms
+            rospy.logwarn_throttle(2.0, f"Pose processing delay: {time_diff*1000:.1f}ms between image capture ({image_timestamp.secs}.{image_timestamp.nsecs}) and transform ({current_time.secs}.{current_time.nsecs})")
+        
+        # Log pose in camera frame before transform for debugging
+        camera_pos = pose[:3, 3]
+        rospy.loginfo_throttle(2.0, f"[TRANSFORM] Pose in camera frame ({self.frame_id}): pos=({camera_pos[0]:.3f}, {camera_pos[1]:.3f}, {camera_pos[2]:.3f})")
+        
+        pose_msg = self._transform_pose_with_fallback('odom', pose_msg_camera, timeout=0.5, strict_timestamp=True)
         if pose_msg is None:
-            # If transform fails, publish in camera frame and log warning
-            if not hasattr(self, '_tf_transform_warning_logged'):
-                rospy.logwarn_throttle(5.0, f"Could not transform pose to odom frame. Publishing in camera frame.")
-                self._tf_transform_warning_logged = True
-            pose_msg = pose_msg_camera
+            # CRITICAL: If strict transform fails, DO NOT use latest transform as it would use wrong robot position
+            # Instead, log error and skip publishing to avoid incorrect pose
+            rospy.logerr_throttle(5.0, f"CRITICAL: Strict timestamp transform failed for image at {image_timestamp.secs}.{image_timestamp.nsecs}. "
+                                      f"Cannot transform pose - robot may have moved. Skipping pose publication to avoid drift.")
+            return  # Skip publishing to avoid incorrect pose
+        
+        # CRITICAL: Verify the transform actually succeeded and frame_id is correct
+        if pose_msg.header.frame_id != 'odom':
+            rospy.logerr_throttle(5.0, f"CRITICAL: Transform returned pose in wrong frame '{pose_msg.header.frame_id}' instead of 'odom'. Skipping publication.")
+            return
+        
+        # Log pose in odom frame after transform for debugging
+        odom_pos = (pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z)
+        rospy.loginfo_throttle(2.0, f"[TRANSFORM] Pose in odom frame: pos=({odom_pos[0]:.3f}, {odom_pos[1]:.3f}, {odom_pos[2]:.3f}), "
+                      f"frame_id={pose_msg.header.frame_id}, stamp={pose_msg.header.stamp.secs}.{pose_msg.header.stamp.nsecs}")
+        
+        # Check if pose position seems reasonable (not at origin, not too close to camera)
+        if abs(odom_pos[0]) < 0.01 and abs(odom_pos[1]) < 0.01 and abs(odom_pos[2]) < 0.01:
+            rospy.logwarn_throttle(5.0, f"WARNING: Transformed pose is at origin (0, 0, 0) in odom frame. This is likely incorrect!")
+        if camera_pos[2] < 0.1:  # Depth too small
+            rospy.logwarn_throttle(5.0, f"WARNING: Pose depth in camera frame is very small ({camera_pos[2]:.3f}m). This might be incorrect.")
         
         # Apply coordinate frame correction (same as in publish_markers) for consistency
         # Only apply if blue axis (Z-axis) is pointing down
@@ -817,8 +1618,20 @@ class FoundationPoseNode:
                 pose_msg.pose.orientation.w = quat_corrected[3]
                 # Position remains unchanged
         
+        # IMPORTANT: Keep the original image timestamp, not current time
+        # The pose represents the object's position at the time the image was captured
+        # The transform to odom frame was done using the exact robot position at that time
+        # The timestamp should reflect when the measurement was made, not when it was published
+        # The transform function should preserve the original timestamp, but ensure it's set correctly
+        if pose_msg.header.stamp != header.stamp:
+            # If transform changed the timestamp, restore the original image timestamp
+            pose_msg.header.stamp = header.stamp
+        
         # Publish transformed pose (in odom frame if transform succeeded, camera frame otherwise)
         # This pose includes coordinate frame correction if enabled
+        odom_pos = (pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z)
+        rospy.loginfo(f"[FOUNDATIONPOSE] ✓✓✓ PUBLISHED POSE TO TOPIC - Odom frame: ({odom_pos[0]:.3f}, {odom_pos[1]:.3f}, {odom_pos[2]:.3f})m, "
+                      f"timestamp: {pose_msg.header.stamp.secs}.{pose_msg.header.stamp.nsecs}")
         self.pose_pub.publish(pose_msg)
         
         # Publish as TF transform (in camera frame - this is the actual object pose)
@@ -871,6 +1684,291 @@ class FoundationPoseNode:
         angle_error_deg = angle_error_rad * 180 / np.pi
         
         return (pos_error, angle_error_deg)
+    
+    def _check_temporal_consistency(self, pose):
+        """
+        Check if pose is consistent with last published pose (not jumping around).
+        
+        Args:
+            pose: Current pose matrix
+            
+        Returns:
+            bool: True if pose is consistent, False if it jumps too much
+        """
+        if self.last_published_pose is None:
+            # First pose, always accept
+            return True
+        
+        # Calculate position difference
+        current_pos = pose[:3, 3]
+        last_pos = self.last_published_pose[:3, 3]
+        pos_diff = np.linalg.norm(current_pos - last_pos)
+        
+        # Reject if position jumps too much (likely false detection)
+        if pos_diff > self.pose_jump_threshold:
+            rospy.logwarn_throttle(2.0, f"Pose position jump too large ({pos_diff:.3f}m > {self.pose_jump_threshold:.3f}m). Rejecting.")
+            return False
+        
+        return True
+    
+    def _validate_pose_without_gt(self, pose):
+        """
+        Validate pose when ground truth is not available.
+        Checks position sanity, depth, and temporal consistency.
+        
+        Args:
+            pose: Pose matrix to validate
+            
+        Returns:
+            bool: True if pose is valid, False otherwise
+        """
+        # Extract position
+        pos = pose[:3, 3]
+        
+        # Check depth is reasonable (object should be in front of camera, not too far)
+        depth = pos[2]  # Z coordinate in camera frame (forward)
+        if depth < 0.1 or depth > 5.0:  # Object should be between 10cm and 5m
+            rospy.logwarn_throttle(2.0, f"Pose depth invalid ({depth:.3f}m). Rejecting.")
+            return False
+        
+        # Check position is reasonable (not too far from camera center in X/Y)
+        # Object should be within reasonable field of view
+        if abs(pos[0]) > 2.0 or abs(pos[1]) > 2.0:  # Within 2m in X/Y
+            rospy.logwarn_throttle(2.0, f"Pose position too far from camera center (x={pos[0]:.3f}, y={pos[1]:.3f}). Rejecting.")
+            return False
+        
+        # Check temporal consistency
+        if not self._check_temporal_consistency(pose):
+            return False
+        
+        return True
+    
+    # ========================================================================
+    # Pose Consensus Buffer
+    # ========================================================================
+    
+    def _print_buffer_contents(self):
+        """Print circular buffer contents in a clean, structured format."""
+        # Commented out to reduce verbosity - uncomment for debugging
+        # if len(self.pose_buffer) == 0:
+        #     rospy.loginfo("[BUFFER] Circular buffer is EMPTY")
+        #     return
+        # 
+        # from scipy.spatial.transform import Rotation
+        # 
+        # rospy.loginfo("=" * 80)
+        # rospy.loginfo(f"[BUFFER] Circular Buffer Contents ({len(self.pose_buffer)}/{self.pose_buffer_size} poses)")
+        # rospy.loginfo("=" * 80)
+        # 
+        # for i, (pose, header) in enumerate(self.pose_buffer):
+        #     pos = pose[:3, 3]
+        #     rot = Rotation.from_matrix(pose[:3, :3])
+        #     quat = rot.as_quat()
+        #     euler = rot.as_euler('zyx', degrees=True)
+        #     timestamp = f"{header.stamp.secs}.{header.stamp.nsecs:09d}"
+        #     
+        #     rospy.loginfo(f"  [{i}] Timestamp: {timestamp}")
+        #     rospy.loginfo(f"       Position (camera): ({pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}) m")
+        #     rospy.loginfo(f"       Orientation (quat): ({quat[0]:.4f}, {quat[1]:.4f}, {quat[2]:.4f}, {quat[3]:.4f})")
+        #     rospy.loginfo(f"       Orientation (euler ZYX): ({euler[0]:.2f}°, {euler[1]:.2f}°, {euler[2]:.2f}°)")
+        #     if i < len(self.pose_buffer) - 1:
+        #         rospy.loginfo("")  # Empty line between entries
+        # 
+        # rospy.loginfo("=" * 80)
+        pass  # Buffer printing disabled for cleaner output
+    
+    def _add_pose_to_buffer(self, pose, header):
+        """
+        Add pose to circular buffer along with its header (timestamp).
+        
+        Args:
+            pose: 4x4 pose matrix to add
+            header: ROS message header (contains timestamp from image capture)
+        """
+        # Store pose with its header (timestamp) - CRITICAL for correct transforms
+        from copy import deepcopy
+        old_size = len(self.pose_buffer)
+        removed_pose = None
+        
+        # Keep buffer size fixed (circular buffer)
+        if len(self.pose_buffer) >= self.pose_buffer_size:
+            removed_pose = self.pose_buffer.pop(0)  # Remove oldest pose
+        
+        self.pose_buffer.append((pose.copy(), deepcopy(header)))
+        
+        # Print buffer contents whenever it changes
+        if removed_pose is not None:
+            rospy.loginfo(f"[BUFFER] Added new pose, removed oldest (buffer full: {self.pose_buffer_size})")
+        else:
+            rospy.loginfo(f"[BUFFER] Added new pose (buffer size: {len(self.pose_buffer)}/{self.pose_buffer_size})")
+        
+        self._print_buffer_contents()
+    
+    def _compute_pose_similarity(self, pose1, pose2):
+        """
+        Compute similarity between two poses.
+        Returns a score where lower is more similar.
+        
+        Args:
+            pose1: First pose matrix (4x4)
+            pose2: Second pose matrix (4x4)
+            
+        Returns:
+            float: Similarity score (lower = more similar)
+        """
+        from scipy.spatial.transform import Rotation
+        
+        # Position difference
+        pos1 = pose1[:3, 3]
+        pos2 = pose2[:3, 3]
+        pos_diff = np.linalg.norm(pos1 - pos2)
+        
+        # Orientation difference
+        R1 = pose1[:3, :3]
+        R2 = pose2[:3, :3]
+        R_diff = R1 @ R2.T
+        rot_diff = Rotation.from_matrix(R_diff)
+        angle_diff_rad = np.linalg.norm(rot_diff.as_rotvec())
+        angle_diff_deg = angle_diff_rad * 180 / np.pi
+        
+        # Combined similarity score (weighted)
+        # Position weight: 1.0 per meter
+        # Orientation weight: 0.01 per degree (so 15 degrees = 0.15)
+        similarity_score = pos_diff + (angle_diff_deg * 0.01)
+        
+        return similarity_score
+    
+    def _get_consensus_pose(self):
+        """
+        Get consensus pose from buffer by clustering similar poses and averaging the largest cluster.
+        Finds poses that are close to each other, computes their average, and returns that.
+        
+        Returns:
+            tuple: (consensus_pose, consensus_count) or (None, 0) if buffer is empty or no consensus
+        """
+        if len(self.pose_buffer) == 0:
+            return None
+        
+        if len(self.pose_buffer) == 1:
+            pose, header = self.pose_buffer[0]
+            from copy import deepcopy
+            return (pose.copy(), deepcopy(header), 1)
+        
+        from scipy.spatial.transform import Rotation
+        
+        # Build similarity matrix: for each pair of poses, check if they're similar
+        # CRITICAL: Only cluster poses that are from similar times (within 0.5 seconds)
+        # This ensures we don't average poses calculated when robot was at very different positions
+        n = len(self.pose_buffer)
+        similar_pairs = []
+        max_time_diff = rospy.Duration(0.5)  # Only cluster poses within 0.5 seconds
+        
+        for i in range(n):
+            for j in range(i + 1, n):
+                pose_i, header_i = self.pose_buffer[i]  # Extract pose and header from tuple
+                pose_j, header_j = self.pose_buffer[j]  # Extract pose and header from tuple
+                
+                # CRITICAL: Check timestamp difference first - only cluster poses from similar times
+                time_diff = abs((header_i.stamp - header_j.stamp).to_sec())
+                if time_diff > max_time_diff.to_sec():
+                    # Poses are from different times - don't cluster them
+                    # This prevents averaging poses calculated when robot was at different positions
+                    continue
+                
+                # Check position difference
+                pos_diff = np.linalg.norm(pose_i[:3, 3] - pose_j[:3, 3])
+                
+                # Check orientation difference
+                R_diff = pose_i[:3, :3] @ pose_j[:3, :3].T
+                rot_diff = Rotation.from_matrix(R_diff)
+                angle_diff_deg = np.linalg.norm(rot_diff.as_rotvec()) * 180 / np.pi
+                
+                # If similar (within thresholds) AND from similar times, add to similar pairs
+                if pos_diff <= self.pose_consensus_threshold and angle_diff_deg <= self.pose_consensus_orientation_threshold:
+                    similar_pairs.append((i, j))
+        
+        # Find the largest cluster of similar poses using union-find (connected components)
+        # Each pose is a node, similar pairs are edges
+        parent = list(range(n))
+        
+        def find(x):
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+        
+        # Union all similar pairs
+        for i, j in similar_pairs:
+            union(i, j)
+        
+        # Find cluster sizes
+        cluster_sizes = {}
+        for i in range(n):
+            root = find(i)
+            if root not in cluster_sizes:
+                cluster_sizes[root] = []
+            cluster_sizes[root].append(i)
+        
+        # Find the largest cluster
+        largest_cluster = max(cluster_sizes.values(), key=len)
+        cluster_size = len(largest_cluster)
+        
+        # Require at least 50% consensus (majority)
+        min_consensus = max(1, len(self.pose_buffer) // 2 + 1)
+        
+        if cluster_size >= min_consensus:
+            # Compute average pose of the largest cluster
+            # Average position
+            avg_position = np.zeros(3)
+            for idx in largest_cluster:
+                pose, _ = self.pose_buffer[idx]  # Extract pose from (pose, header) tuple
+                avg_position += pose[:3, 3]
+            avg_position /= cluster_size
+            
+            # Average rotation using quaternion averaging
+            quaternions = []
+            for idx in largest_cluster:
+                pose, _ = self.pose_buffer[idx]  # Extract pose from (pose, header) tuple
+                R = pose[:3, :3]
+                rot = Rotation.from_matrix(R)
+                quat = rot.as_quat()  # [x, y, z, w]
+                quaternions.append(quat)
+            
+            # Average quaternions (simple mean, then normalize)
+            avg_quat = np.mean(quaternions, axis=0)
+            avg_quat = avg_quat / np.linalg.norm(avg_quat)  # Normalize
+            
+            # Convert back to rotation matrix
+            avg_rot = Rotation.from_quat(avg_quat)
+            avg_R = avg_rot.as_matrix()
+            
+            # Build average pose matrix
+            avg_pose = np.eye(4)
+            avg_pose[:3, :3] = avg_R
+            avg_pose[:3, 3] = avg_position
+            
+            # CRITICAL: Use header from the LATEST pose in the cluster (most recent timestamp)
+            # Since we only cluster poses from similar times (within 0.5s), using latest timestamp is safe
+            # All poses in cluster were calculated when robot was at similar positions
+            latest_idx_in_cluster = max(largest_cluster)  # Latest index = most recent pose
+            _, consensus_header = self.pose_buffer[latest_idx_in_cluster]
+            from copy import deepcopy
+            consensus_header_copy = deepcopy(consensus_header)
+            
+            # Log timestamp range for debugging
+            timestamps = [self.pose_buffer[idx][1].stamp for idx in largest_cluster]
+            time_range = max([t.to_sec() for t in timestamps]) - min([t.to_sec() for t in timestamps])
+            rospy.logdebug(f"Consensus cluster timestamp range: {time_range*1000:.1f}ms (poses from similar times)")
+            
+            rospy.logdebug(f"Consensus pose found: {cluster_size}/{len(self.pose_buffer)} poses in cluster (threshold: {min_consensus})")
+            return (avg_pose, consensus_header_copy, cluster_size)
+        else:
+            rospy.logdebug(f"No consensus: largest cluster size {cluster_size} < required {min_consensus} (buffer size: {len(self.pose_buffer)}). Will use latest pose.")
+            return None
     
     # ========================================================================
     # Utility Methods
@@ -931,18 +2029,18 @@ class FoundationPoseNode:
         ])
         return pos, quat
     
-    def _transform_pose_with_fallback(self, target_frame, pose_msg, timeout=0.5):
+    def _transform_pose_with_fallback(self, target_frame, pose_msg, timeout=0.5, strict_timestamp=True):
         """
         Transform a PoseStamped message to target_frame with fallback logic.
         
-        First tries with the message's timestamp, then falls back to current time
-        if that fails (e.g., due to extrapolation into past).
-        Also tries intermediate frames (odom, base_link) if direct transform fails.
+        IMPORTANT: When strict_timestamp=True, always uses the original image timestamp
+        to ensure pose is calculated with the exact camera position when image was captured.
         
         Args:
             target_frame: Target frame ID (e.g., 'map', 'odom', 'head_rgbd_sensor_rgb_frame')
-            pose_msg: PoseStamped message to transform
+            pose_msg: PoseStamped message to transform (must have correct timestamp from image)
             timeout: Timeout duration for waitForTransform (default: 0.5 seconds)
+            strict_timestamp: If True, only use original timestamp (default: True)
         
         Returns:
             PoseStamped: Transformed pose, or None if transform fails
@@ -950,6 +2048,7 @@ class FoundationPoseNode:
         from copy import deepcopy
         
         source_frame = pose_msg.header.frame_id
+        original_timestamp = pose_msg.header.stamp  # Preserve original image timestamp
         
         # If source and target are the same, return as-is
         if source_frame == target_frame:
@@ -957,70 +2056,124 @@ class FoundationPoseNode:
         
         error_msgs = []
         
-        # Try direct transform first
+        # Try direct transform first - ALWAYS use original timestamp
         try:
-            # First try with the message's timestamp
+            # Use the original image timestamp to get exact transform from when image was captured
+            # This ensures we use the robot's position at image capture time, not current time
             self.tf_listener.waitForTransform(
                 target_frame,
                 source_frame,
-                pose_msg.header.stamp,
+                original_timestamp,  # Use original timestamp, not current time
                 rospy.Duration(timeout)
             )
-            return self.tf_listener.transformPose(target_frame, pose_msg)
+            # Ensure we use the original timestamp for the transform
+            pose_msg_with_timestamp = deepcopy(pose_msg)
+            pose_msg_with_timestamp.header.stamp = original_timestamp
+            
+            # Log transform details for debugging (only if significant delay)
+            if strict_timestamp:
+                current_time = rospy.Time.now()
+                time_diff = (current_time - original_timestamp).to_sec()
+                if time_diff > 0.1:  # Log if there's significant delay (>100ms)
+                    rospy.logdebug(f"Transform: Using robot position at {original_timestamp.secs}.{original_timestamp.nsecs} "
+                                  f"(current: {current_time.secs}.{current_time.nsecs}, diff: {time_diff*1000:.1f}ms)")
+            
+            transformed_pose = self.tf_listener.transformPose(target_frame, pose_msg_with_timestamp)
+            
+            # CRITICAL: Verify frame_id is correct
+            if transformed_pose.header.frame_id != target_frame:
+                rospy.logerr_throttle(5.0, f"CRITICAL: Transform returned wrong frame_id '{transformed_pose.header.frame_id}' instead of '{target_frame}'. "
+                                          f"Source frame: {source_frame}, timestamp: {original_timestamp.secs}.{original_timestamp.nsecs}")
+                return None  # Return None to indicate failure
+            
+            # Verify the transformed pose still has the correct timestamp
+            if transformed_pose.header.stamp != original_timestamp:
+                rospy.logwarn_throttle(5.0, f"Transform changed timestamp from {original_timestamp.secs}.{original_timestamp.nsecs} "
+                                          f"to {transformed_pose.header.stamp.secs}.{transformed_pose.header.stamp.nsecs}. Restoring original.")
+                transformed_pose.header.stamp = original_timestamp
+            
+            # Ensure frame_id is explicitly set (double-check)
+            transformed_pose.header.frame_id = target_frame
+            
+            return transformed_pose
         except Exception as e1:
-            error_msgs.append(f"Direct transform (with timestamp): {str(e1)[:150]}")
-            # If that fails, try with current time
-            try:
-                pose_msg_latest = deepcopy(pose_msg)
-                pose_msg_latest.header.stamp = rospy.Time.now()
-                self.tf_listener.waitForTransform(
-                    target_frame,
-                    source_frame,
-                    rospy.Time(0),  # Latest available for waitForTransform
-                    rospy.Duration(timeout)
-                )
-                return self.tf_listener.transformPose(target_frame, pose_msg_latest)
-            except Exception as e2:
-                error_msgs.append(f"Direct transform (latest time): {str(e2)[:150]}")
-                # Try multi-hop transform through intermediate frames
-                # Common intermediate frames: odom, base_link
-                intermediate_frames = ['odom', 'base_link', 'base_footprint']
-                
-                for intermediate in intermediate_frames:
-                    try:
-                        # Transform source -> intermediate -> target
-                        # Use a small time offset in the past to avoid extrapolation errors
-                        # First: source -> intermediate
-                        pose_intermediate = deepcopy(pose_msg)
-                        # Use a small offset in the past to ensure we don't extrapolate
-                        # rospy.Time(0) means "latest", but we need to be slightly in the past
-                        latest_time = self.tf_listener.getLatestCommonTime(source_frame, intermediate)
-                        pose_intermediate.header.stamp = latest_time
-                        
-                        self.tf_listener.waitForTransform(
-                            intermediate,
-                            source_frame,
-                            latest_time,
-                            rospy.Duration(timeout)
-                        )
-                        pose_intermediate = self.tf_listener.transformPose(intermediate, pose_intermediate)
-                        
-                        # Second: intermediate -> target
-                        # Get latest common time for the second transform
-                        latest_time2 = self.tf_listener.getLatestCommonTime(intermediate, target_frame)
-                        pose_intermediate.header.stamp = latest_time2
-                        self.tf_listener.waitForTransform(
-                            target_frame,
-                            intermediate,
-                            latest_time2,
-                            rospy.Duration(timeout)
-                        )
-                        result = self.tf_listener.transformPose(target_frame, pose_intermediate)
-                        rospy.logdebug(f"Successfully transformed {source_frame} -> {intermediate} -> {target_frame}")
-                        return result
-                    except Exception as e3:
-                        error_msgs.append(f"Multi-hop via {intermediate}: {str(e3)[:150]}")
-                        continue  # Try next intermediate frame
+            error_msgs.append(f"Direct transform (with original timestamp): {str(e1)[:150]}")
+            
+            # If strict_timestamp is False, try with current time as fallback
+            # But for pose estimation, we should always use strict_timestamp=True
+            if not strict_timestamp:
+                try:
+                    pose_msg_latest = deepcopy(pose_msg)
+                    pose_msg_latest.header.stamp = rospy.Time.now()
+                    self.tf_listener.waitForTransform(
+                        target_frame,
+                        source_frame,
+                        rospy.Time(0),  # Latest available for waitForTransform
+                        rospy.Duration(timeout)
+                    )
+                    return self.tf_listener.transformPose(target_frame, pose_msg_latest)
+                except Exception as e2:
+                    error_msgs.append(f"Direct transform (latest time): {str(e2)[:150]}")
+            
+            # Try multi-hop transform through intermediate frames
+            # Use original timestamp if strict, otherwise try to get latest common time
+            intermediate_frames = ['odom', 'base_link', 'base_footprint']
+            
+            for intermediate in intermediate_frames:
+                try:
+                    # Transform source -> intermediate -> target
+                    if strict_timestamp:
+                        # Use original timestamp to ensure we get the transform from when image was captured
+                        timestamp_to_use = original_timestamp
+                    else:
+                        # Try to get latest common time, fallback to original timestamp
+                        try:
+                            latest_time = self.tf_listener.getLatestCommonTime(source_frame, intermediate)
+                            if latest_time is not None and latest_time.to_sec() > 0:
+                                timestamp_to_use = latest_time
+                            else:
+                                timestamp_to_use = original_timestamp
+                        except:
+                            timestamp_to_use = original_timestamp
+                    
+                    pose_intermediate = deepcopy(pose_msg)
+                    pose_intermediate.header.stamp = timestamp_to_use
+                    
+                    self.tf_listener.waitForTransform(
+                        intermediate,
+                        source_frame,
+                        timestamp_to_use,
+                        rospy.Duration(timeout)
+                    )
+                    pose_intermediate = self.tf_listener.transformPose(intermediate, pose_intermediate)
+                    
+                    # Second: intermediate -> target
+                    # Get timestamp for second transform
+                    if strict_timestamp:
+                        timestamp_to_use2 = original_timestamp
+                    else:
+                        try:
+                            latest_time2 = self.tf_listener.getLatestCommonTime(intermediate, target_frame)
+                            if latest_time2 is not None and latest_time2.to_sec() > 0:
+                                timestamp_to_use2 = latest_time2
+                            else:
+                                timestamp_to_use2 = original_timestamp
+                        except:
+                            timestamp_to_use2 = original_timestamp
+                    
+                    pose_intermediate.header.stamp = timestamp_to_use2
+                    self.tf_listener.waitForTransform(
+                        target_frame,
+                        intermediate,
+                        timestamp_to_use2,
+                        rospy.Duration(timeout)
+                    )
+                    result = self.tf_listener.transformPose(target_frame, pose_intermediate)
+                    rospy.logdebug(f"Successfully transformed {source_frame} -> {intermediate} -> {target_frame}")
+                    return result
+                except Exception as e3:
+                    error_msgs.append(f"Multi-hop via {intermediate}: {str(e3)[:150]}")
+                    continue  # Try next intermediate frame
                 
                 # All transforms failed - log detailed error
                 error_key = f"{source_frame}->{target_frame}"
@@ -1122,7 +2275,8 @@ class FoundationPoseNode:
         print(f"  Orientation: [{gt_world_quat[0]:.4f}, {gt_world_quat[1]:.4f}, {gt_world_quat[2]:.4f}, {gt_world_quat[3]:.4f}]", file=sys.stderr, flush=True)
         
         # 2. Transform to camera frame for comparison with FoundationPose
-        gt_camera_pose = self._transform_pose_with_fallback(self.frame_id, gt_pose_msg, timeout=1.0)
+        # For ground truth comparison, use strict_timestamp=False to allow fallback if exact timestamp unavailable
+        gt_camera_pose = self._transform_pose_with_fallback(self.frame_id, gt_pose_msg, timeout=1.0, strict_timestamp=False)
         if gt_camera_pose is not None:
             gt_camera_pos, gt_camera_quat = self._extract_pose_arrays(gt_camera_pose)
             
@@ -1136,7 +2290,8 @@ class FoundationPoseNode:
             print(f"[FOUNDATIONPOSE] Could not transform to camera frame", file=sys.stderr, flush=True)
         
         # 3. Transform to odom frame
-        gt_odom_pose = self._transform_pose_with_fallback('odom', gt_pose_msg, timeout=1.0)
+        # For ground truth comparison, use strict_timestamp=False to allow fallback if exact timestamp unavailable
+        gt_odom_pose = self._transform_pose_with_fallback('odom', gt_pose_msg, timeout=1.0, strict_timestamp=False)
         if gt_odom_pose is not None:
             gt_odom_pos, gt_odom_quat = self._extract_pose_arrays(gt_odom_pose)
             
@@ -1275,10 +2430,7 @@ class FoundationPoseNode:
                 angle_error_deg = angle_error_deg_aligned
                 # Removed verbose debug print for quaternion sign ambiguity
         
-        # Print comparison (use print for visibility, throttled)
-        if not hasattr(self, '_last_comparison_time'):
-            self._last_comparison_time = 0
-        
+        # Print comparison (use print for visibility, throttled to match performance metrics)
         current_time = rospy.get_time()
         if current_time - self._last_comparison_time >= self.COMPARISON_PRINT_INTERVAL:
             # Use sys.stderr for immediate visibility (not buffered)
@@ -1406,11 +2558,38 @@ class FoundationPoseNode:
         pose_camera = self._pose_matrix_to_pose_stamped(pose, header, self.frame_id)
         
         # Transform pose to odom frame for RViz visualization (RViz uses odom as fixed frame)
-        pose_odom = self._transform_pose_with_fallback('odom', pose_camera, timeout=0.1)
+        # CRITICAL: Use strict_timestamp=True to ensure we use the exact robot position at image capture time
+        # This prevents drift when robot moves - the pose must be transformed using the robot position
+        # at the time the image was captured, not the current robot position
+        # Log pose in camera frame before transform for debugging
+        rospy.logdebug(f"Marker pose in camera frame ({self.frame_id}): pos=({pose[:3, 3][0]:.3f}, {pose[:3, 3][1]:.3f}, {pose[:3, 3][2]:.3f})")
+        
+        pose_odom = self._transform_pose_with_fallback('odom', pose_camera, timeout=0.5, strict_timestamp=True)
         if pose_odom is None:
-            # If transform fails, use camera frame (but log warning)
-            rospy.logwarn_throttle(5.0, "Could not transform marker to odom frame, using camera frame")
-            pose_odom = pose_camera
+            # CRITICAL: If strict transform fails, DO NOT use latest transform (would use wrong robot position)
+            # Skip marker publication to avoid incorrect visualization
+            rospy.logerr_throttle(5.0, f"CRITICAL: Could not transform marker to odom frame using strict timestamp {header.stamp.secs}.{header.stamp.nsecs}. "
+                                      f"Skipping marker publication to avoid drift.")
+            return  # Don't publish marker if transform fails
+        
+        # CRITICAL: Verify the transform actually succeeded and frame_id is correct
+        if pose_odom.header.frame_id != 'odom':
+            rospy.logerr_throttle(5.0, f"CRITICAL: Marker transform returned pose in wrong frame '{pose_odom.header.frame_id}' instead of 'odom'. Skipping marker publication.")
+            return
+        
+        # IMPORTANT: Keep the original image timestamp for markers too
+        # The pose position/orientation are already correctly transformed to odom frame using the exact timestamp
+        # The timestamp should reflect when the measurement was made, not when it was published
+        # The transform function should preserve the original timestamp, but ensure it's set correctly
+        if pose_odom.header.stamp != header.stamp:
+            # If transform changed the timestamp, restore the original image timestamp
+            pose_odom.header.stamp = header.stamp
+        # Ensure frame_id is set correctly (double-check)
+        pose_odom.header.frame_id = 'odom'
+        
+        # Log pose in odom frame after transform for debugging
+        rospy.logdebug(f"Marker pose in odom frame: pos=({pose_odom.pose.position.x:.3f}, {pose_odom.pose.position.y:.3f}, {pose_odom.pose.position.z:.3f}), "
+                      f"frame_id={pose_odom.header.frame_id}, stamp={pose_odom.header.stamp.secs}.{pose_odom.header.stamp.nsecs}")
         
         # Apply coordinate frame correction AFTER transforming to odom frame
         # This ensures the correction is applied in the frame where RViz visualizes (odom)
@@ -1565,9 +2744,19 @@ class FoundationPoseNode:
         marker.scale.y = 1.0
         marker.scale.z = 1.0
         marker.color.a = 0.5
-        marker.color.r = 1.0
-        marker.color.g = 0.0
-        marker.color.b = 0.0
+        
+        # Alternate between red and blue each time a new pose is published for visual debugging
+        self.marker_color_counter += 1
+        if self.marker_color_counter % 2 == 0:
+            # Even: Red
+            marker.color.r = 1.0
+            marker.color.g = 0.0
+            marker.color.b = 0.0
+        else:
+            # Odd: Blue
+            marker.color.r = 0.0
+            marker.color.g = 0.0
+            marker.color.b = 1.0
         marker.mesh_resource = f"file://{self.mesh_file}"
         marker.mesh_use_embedded_materials = True
         
@@ -1636,6 +2825,9 @@ class FoundationPoseNode:
             
             marker_array.markers.append(axis_marker)
         
+        marker_pos = (pose_odom.pose.position.x, pose_odom.pose.position.y, pose_odom.pose.position.z)
+        rospy.loginfo(f"[FOUNDATIONPOSE] ✓✓✓ PUBLISHED MARKERS TO TOPIC - Odom frame: ({marker_pos[0]:.3f}, {marker_pos[1]:.3f}, {marker_pos[2]:.3f})m, "
+                      f"timestamp: {pose_odom.header.stamp.secs}.{pose_odom.header.stamp.nsecs}")
         self.marker_pub.publish(marker_array)
     
     # ========================================================================
@@ -1650,9 +2842,27 @@ class FoundationPoseNode:
 # MAIN EXECUTION
 # ============================================================================
 
-if __name__ == '__main__':
+def main():
+    """Main function."""
+    node = None
     try:
         node = FoundationPoseNode()
         node.run()
     except rospy.ROSInterruptException:
         pass
+    except KeyboardInterrupt:
+        rospy.loginfo("Shutting down FoundationPose node")
+    finally:
+        # Save final metrics on shutdown
+        if node is not None:
+            try:
+                import json
+                if hasattr(node, 'metrics_data') and node.metrics_data:
+                    with open(node.metrics_file, 'w') as f:
+                        json.dump(node.metrics_data, f, indent=2)
+                    rospy.loginfo(f"Saved {len(node.metrics_data)} metrics entries to {node.metrics_file}")
+            except Exception as e:
+                rospy.logwarn(f"Failed to save final metrics: {e}")
+
+if __name__ == '__main__':
+    main()
