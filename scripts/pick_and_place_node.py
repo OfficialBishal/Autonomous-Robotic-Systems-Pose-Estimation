@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple Pick and Place ROS Node for HSR Robot
-
-This node subscribes to object pose estimates from FoundationPose and executes
-simple pick operations using MoveIt for motion planning.
+Pick and place node for HSR robot using MoveIt.
 """
 
 import rospy
@@ -97,7 +94,7 @@ class PickAndPlaceNode:
                 rospy.logwarn(">>> [MOVEIT] WARNING: arm_lift_joint not found in active joints!")
         except Exception as e:
             rospy.logwarn(f">>> [MOVEIT] Could not get initial robot state: {e}")
-            rospy.logwarn(">>> [MOVEIT] This is OK if robot hasn't started publishing joint_states yet")
+            rospy.logwarn(">>> [MOVEIT] This is if robot hasn't started publishing joint_states yet")
         
         # TEST: Verify all joints can move by testing each one (optional)
         if self.test_joints_on_init:
@@ -189,22 +186,22 @@ class PickAndPlaceNode:
                         moved = abs(new_value - initial_value) > 0.01  # At least 1cm or 0.01 rad
                         
                         if moved:
-                            rospy.loginfo(f">>> [INIT_TEST]   ✓ {joint_name} MOVED: {initial_value:.3f} -> {new_value:.3f}")
+                            rospy.loginfo(f">>> [INIT_TEST]   {joint_name} MOVED: {initial_value:.3f} -> {new_value:.3f}")
                             test_results[joint_name] = True
                         else:
-                            rospy.logwarn(f">>> [INIT_TEST]   ✗ {joint_name} did not move (stayed at {new_value:.3f})")
+                            rospy.logwarn(f">>> [INIT_TEST]    {joint_name} did not move (stayed at {new_value:.3f})")
                             test_results[joint_name] = False
                         
                         # Update current values for next test
                         current_joint_values = new_values
                     else:
-                        rospy.logwarn(f">>> [INIT_TEST]   ✗ {joint_name} movement FAILED (go() returned False)")
+                        rospy.logwarn(f">>> [INIT_TEST]    {joint_name} movement FAILED (go() returned False)")
                         test_results[joint_name] = False
                     
                     rospy.sleep(0.5)  # Brief pause between tests
                     
                 except Exception as e:
-                    rospy.logerr(f">>> [INIT_TEST]   ✗ {joint_name} test ERROR: {e}")
+                    rospy.logerr(f">>> [INIT_TEST]    {joint_name} test ERROR: {e}")
                     test_results[joint_name] = False
                     import traceback
                     rospy.logerr(traceback.format_exc())
@@ -213,15 +210,15 @@ class PickAndPlaceNode:
             rospy.loginfo(">>> [INIT_TEST] Test Summary:")
             all_passed = True
             for joint_name, passed in test_results.items():
-                status = "✓ PASS" if passed else "✗ FAIL"
+                status = "PASS" if passed else " FAIL"
                 rospy.loginfo(f">>> [INIT_TEST]   {joint_name}: {status}")
                 if not passed:
                     all_passed = False
             
             if all_passed:
-                rospy.loginfo(">>> [INIT_TEST] ✓ All joints can move!")
+                rospy.loginfo(">>> [INIT_TEST] All joints can move!")
             else:
-                rospy.logwarn(">>> [INIT_TEST] ✗ Some joints failed to move - this may cause planning issues")
+                rospy.logwarn(">>> [INIT_TEST]  Some joints failed to move - this may cause planning issues")
             
             # Move back to initial position (or 'go' position)
             rospy.loginfo(">>> [INIT_TEST] Moving arm back to 'go' position...")
@@ -230,11 +227,11 @@ class PickAndPlaceNode:
                 self.arm.set_planning_time(10.0)
                 success = self.arm.go(wait=True)
                 if success:
-                    rospy.loginfo(">>> [INIT_TEST] ✓ Arm returned to 'go' position")
+                    rospy.loginfo(">>> [INIT_TEST] Arm returned to 'go' position")
                 else:
-                    rospy.logwarn(">>> [INIT_TEST] ✗ Failed to return to 'go' position")
+                    rospy.logwarn(">>> [INIT_TEST]  Failed to return to 'go' position")
             except Exception as e:
-                rospy.logwarn(f">>> [INIT_TEST] ✗ Error returning to 'go' position: {e}")
+                rospy.logwarn(f">>> [INIT_TEST]  Error returning to 'go' position: {e}")
             
             rospy.sleep(1.0)  # Final pause
             
@@ -423,7 +420,7 @@ class PickAndPlaceNode:
                     for i, joint_name in enumerate(joint_names):
                         if abs(final_joint_values[i] - before_joint_values[i]) > 0.01:
                             joint_moved = True
-                            rospy.loginfo(f">>> [PREPARE]   ✓ {joint_name} moved: {before_joint_values[i]:.3f} -> {final_joint_values[i]:.3f}")
+                            rospy.loginfo(f">>> [PREPARE]   {joint_name} moved: {before_joint_values[i]:.3f} -> {final_joint_values[i]:.3f}")
                     
                     if not joint_moved:
                         rospy.logwarn(">>> [PREPARE]   WARNING: No joints moved! This suggests the arm may not be responding to commands.")
@@ -433,7 +430,7 @@ class PickAndPlaceNode:
                                  abs(final_pose.position.y - before_pose.position.y) > 0.01 or
                                  abs(final_pose.position.z - before_pose.position.z) > 0.01)
                     if pose_moved:
-                        rospy.loginfo(f">>> [PREPARE]   ✓ End-effector moved: ({before_pose.position.x:.3f}, {before_pose.position.y:.3f}, {before_pose.position.z:.3f}) -> ({final_pose.position.x:.3f}, {final_pose.position.y:.3f}, {final_pose.position.z:.3f})")
+                        rospy.loginfo(f">>> [PREPARE]   End-effector moved: ({before_pose.position.x:.3f}, {before_pose.position.y:.3f}, {before_pose.position.z:.3f}) -> ({final_pose.position.x:.3f}, {final_pose.position.y:.3f}, {final_pose.position.z:.3f})")
                     else:
                         rospy.logwarn(">>> [PREPARE]   WARNING: End-effector did not move!")
                 else:
@@ -455,7 +452,7 @@ class PickAndPlaceNode:
         """Move arm to approach position above object."""
         rospy.loginfo("Approaching object...")
         try:
-            # IMPORTANT: Ensure MoveIt has the latest robot state before planning
+            # Ensure MoveIt has the latest robot state before planning
             # MoveIt automatically gets state from /joint_states topic, but we should verify
             rospy.loginfo(">>> [APPROACH] Step 0: Verifying current robot state...")
             try:
@@ -550,7 +547,7 @@ class PickAndPlaceNode:
             self.arm.set_goal_orientation_tolerance(0.5)  # Allow ~29 degrees tolerance (increased from 0.2)
             self.arm.set_goal_position_tolerance(0.05)  # Allow 5cm position tolerance (increased from 0.02)
             
-            # CRITICAL: Ensure planning timeout is actually set and respected
+            # Ensure planning timeout is actually set and respected
             # MoveIt sometimes has issues with timeout, so we'll set it multiple times
             self.arm.set_planning_time(self.planning_timeout)
             actual_timeout = self.arm.get_planning_time()
@@ -594,7 +591,7 @@ class PickAndPlaceNode:
             error_code = None
             
             # Ensure planning timeout is set before Strategy 1
-            # CRITICAL: MoveIt sometimes ignores set_planning_time, so we set it multiple times
+            # MoveIt sometimes ignores set_planning_time, so we set it multiple times
             self.arm.set_planning_time(self.planning_timeout)
             rospy.sleep(0.1)  # Brief pause to ensure timeout is set
             self.arm.set_planning_time(self.planning_timeout)  # Set again to be sure
@@ -1228,8 +1225,7 @@ class PickAndPlaceNode:
         rospy.loginfo(f">>> [APPROACH]   Top surface Z: {top_surface_z:.3f}m (center + height/2)")
         rospy.loginfo(f">>> [APPROACH]   Approach Z: {approach_pos[2]:.3f}m (top + {self.approach_height:.3f}m, min: {min_approach_z_from_base:.3f}m)")
         
-        # Use top-down orientation (same as grasp pose) for consistent planning
-        # This ensures the arm can smoothly transition from approach to grasp
+        # Use top-down orientation for smooth approach-to-grasp transition
         roll, pitch, yaw = self.end_effector_orientation
         quat = quaternion_from_euler(roll, pitch, yaw)
         

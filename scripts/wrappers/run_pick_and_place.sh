@@ -2,7 +2,7 @@
 # Wrapper script to run Pick and Place node
 # Uses system ROS environment (NOT conda) to avoid libffi conflicts with MoveIt
 
-# CRITICAL: Deactivate conda if it's active and clear all conda-related environment variables
+# Deactivate conda if it's active and clear all conda-related environment variables
 # This must be done FIRST before sourcing ROS
 if [ -n "$CONDA_DEFAULT_ENV" ] || [ -n "$CONDA_PREFIX" ]; then
     # Deactivate conda if it's active
@@ -23,7 +23,7 @@ unset CONDA_PROMPT_MODIFIER
 unset CONDA_PYTHON_EXE
 unset CONDA_SHLVL
 
-# CRITICAL: Clear LD_PRELOAD completely to avoid conda libffi conflicts
+# Clear LD_PRELOAD completely to avoid conda libffi conflicts
 unset LD_PRELOAD
 
 # Remove any conda paths from LD_LIBRARY_PATH

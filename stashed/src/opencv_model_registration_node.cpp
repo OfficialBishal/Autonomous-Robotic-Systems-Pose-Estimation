@@ -46,7 +46,7 @@ private:
     
     // Points to register (8 corners of bounding box)
     const int num_registration_points_ = 8;
-    const int corner_order_[8] = {0, 1, 2, 3, 4, 5, 6, 7}; // Front-top-right, front-top-left, etc.
+    std::vector<cv::Point3f> bounding_box_corners_;  // Will be computed from mesh
     
     void imageCallback(const sensor_msgs::ImageConstPtr& msg);
     void cameraInfoCallback(const sensor_msgs::CameraInfoConstPtr& msg);
@@ -85,6 +85,37 @@ OpenCVModelRegistration::OpenCVModelRegistration()
     ROS_INFO("Loading mesh from: %s", mesh_file_path_.c_str());
     mesh_.load(mesh_file_path_);
     ROS_INFO("Loaded mesh with %d vertices", mesh_.getNumVertices());
+    
+    // Compute bounding box corners from mesh
+    // Find min/max in each dimension
+    float min_x = 1e6, max_x = -1e6;
+    float min_y = 1e6, max_y = -1e6;
+    float min_z = 1e6, max_z = -1e6;
+    
+    for (int i = 0; i < mesh_.getNumVertices(); i++) {
+        cv::Point3f v = mesh_.getVertex(i);
+        min_x = std::min(min_x, v.x);
+        max_x = std::max(max_x, v.x);
+        min_y = std::min(min_y, v.y);
+        max_y = std::max(max_y, v.y);
+        min_z = std::min(min_z, v.z);
+        max_z = std::max(max_z, v.z);
+    }
+    
+    // Create 8 corners of bounding box
+    // Order: Front-top-right, Front-top-left, Front-bottom-left, Front-bottom-right,
+    //        Rear-top-right, Rear-top-left, Rear-bottom-left, Rear-bottom-right
+    bounding_box_corners_.push_back(cv::Point3f(max_x, min_y, max_z));  // Front-top-right
+    bounding_box_corners_.push_back(cv::Point3f(min_x, min_y, max_z));  // Front-top-left
+    bounding_box_corners_.push_back(cv::Point3f(min_x, max_y, max_z));  // Front-bottom-left
+    bounding_box_corners_.push_back(cv::Point3f(max_x, max_y, max_z));  // Front-bottom-right
+    bounding_box_corners_.push_back(cv::Point3f(max_x, min_y, min_z));  // Rear-top-right
+    bounding_box_corners_.push_back(cv::Point3f(min_x, min_y, min_z));  // Rear-top-left
+    bounding_box_corners_.push_back(cv::Point3f(min_x, max_y, min_z));   // Rear-bottom-left
+    bounding_box_corners_.push_back(cv::Point3f(max_x, max_y, min_z));  // Rear-bottom-right
+    
+    ROS_INFO("Computed bounding box: x=[%.3f, %.3f], y=[%.3f, %.3f], z=[%.3f, %.3f]",
+             min_x, max_x, min_y, max_y, min_z, max_z);
     
     // Initialize camera parameters (will be updated from camera_info)
     camera_params_[0] = 500.0;
@@ -171,15 +202,20 @@ void OpenCVModelRegistration::onMouse(int event, int x, int y, int flags, void* 
     if (event == cv::EVENT_LBUTTONUP) {
         if (g_registration_ptr->registration_.is_registrable()) {
             int n_regist = g_registration_ptr->registration_.getNumRegist();
-            int n_vertex = g_registration_ptr->corner_order_[n_regist];
             
             cv::Point2f point_2d((float)x, (float)y);
-            cv::Point3f point_3d = g_registration_ptr->mesh_.getVertex(n_vertex);
+            cv::Point3f point_3d = g_registration_ptr->bounding_box_corners_[n_regist];
             
             g_registration_ptr->registration_.registerPoint(point_2d, point_3d);
             
-            ROS_INFO("Registered point %d/%d: 2D=(%.1f, %.1f), 3D=(%.3f, %.3f, %.3f)",
+            const char* corner_names[] = {
+                "Front-top-right", "Front-top-left", "Front-bottom-left", "Front-bottom-right",
+                "Rear-top-right", "Rear-top-left", "Rear-bottom-left", "Rear-bottom-right"
+            };
+            
+            ROS_INFO("Registered point %d/%d (%s): 2D=(%.1f, %.1f), 3D=(%.3f, %.3f, %.3f)",
                      n_regist + 1, g_registration_ptr->num_registration_points_,
+                     corner_names[n_regist],
                      point_2d.x, point_2d.y, point_3d.x, point_3d.y, point_3d.z);
             
             if (g_registration_ptr->registration_.getNumRegist() == g_registration_ptr->num_registration_points_) {
@@ -219,8 +255,7 @@ void OpenCVModelRegistration::run() {
         // Draw current point to register
         if (!registration_complete_) {
             int n_regist = registration_.getNumRegist();
-            int n_vertex = corner_order_[n_regist];
-            cv::Point3f current_point3d = mesh_.getVertex(n_vertex);
+            cv::Point3f current_point3d = bounding_box_corners_[n_regist];
             drawQuestion(img_vis, current_point3d, green);
             drawCounter(img_vis, registration_.getNumRegist(), num_registration_points_, red);
         }
@@ -307,7 +342,4 @@ int main(int argc, char** argv) {
     ros::spin();
     return 0;
 }
-
-
-
 

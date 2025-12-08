@@ -29,7 +29,7 @@ fi
 
 # Re-apply LD_LIBRARY_PATH and LD_PRELOAD after ROS setup (in case ROS modified it)
 # Also check if LD_PRELOAD was set by launch file (roslaunch env tag)
-# CRITICAL: Ensure conda lib is FIRST in LD_LIBRARY_PATH so libp11-kit finds conda's libffi
+# Ensure conda lib is FIRST in LD_LIBRARY_PATH so libp11-kit finds conda's libffi
 if [ -d "$CONDA_PREFIX/lib" ]; then
     # If LD_LIBRARY_PATH was set by launch file, it might only have conda lib
     # In that case, we need to preserve it and add other paths after
@@ -111,6 +111,6 @@ if [ "${DEBUG_FOUNDATIONPOSE:-0}" = "1" ] || [ -n "$ROS_MASTER_URI" ]; then
 fi
 
 # Run the node
-# CRITICAL: LD_PRELOAD and LD_LIBRARY_PATH must be exported and set before exec
+# LD_PRELOAD and LD_LIBRARY_PATH must be exported and set before exec
 # The exec command will preserve these environment variables for Python
 exec python3 "$PACKAGE_PATH/scripts/foundationpose_pose_estimation_node.py" "$@"

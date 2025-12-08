@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
-SAM Segmentation ROS Node
-
-Subscribes to RGB images, uses SAM to generate object masks,
-and publishes masks for FoundationPose pose estimation.
+SAM segmentation ROS node.
 """
 
-# Imports
-
-# Standard library
 import os
 import sys
 import time
@@ -20,7 +14,6 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
-# ROS
 import rospy
 from sensor_msgs.msg import Image
 
@@ -49,7 +42,7 @@ class SAMSegmentationNode:
     """
     SAM Segmentation ROS Node
     
-    Subscribes to RGB camera topic, performs object segmentation using SAM,
+    Object segmentation using SAM and YOLO.
     and publishes masks for FoundationPose.
     """
     
@@ -114,7 +107,6 @@ class SAMSegmentationNode:
         if not PSUTIL_AVAILABLE:
             rospy.logwarn("psutil not available, CPU monitoring will be disabled")
     
-    # Initialization Methods
     
     def _load_parameters(self):
         """Load ROS parameters from config file (organized structure)."""
@@ -339,14 +331,14 @@ class SAMSegmentationNode:
             img_array: numpy.ndarray image
             encoding: ROS image encoding (e.g., 'mono8', 'rgb8')
             frame_id: Frame ID for header (used if header is None)
-            header: ROS message header to copy timestamp and frame_id from (CRITICAL for synchronization)
+            header: ROS message header to copy timestamp and frame_id from
         
         Returns:
             sensor_msgs.msg.Image: ROS Image message
         """
         img_msg = Image()
         if header is not None:
-            # CRITICAL: Use the original header timestamp and frame_id for proper synchronization
+            # Use original header for timestamp sync
             img_msg.header.stamp = header.stamp
             img_msg.header.frame_id = header.frame_id
         else:
@@ -475,18 +467,18 @@ class SAMSegmentationNode:
         rospy.loginfo("=" * 80)
         rospy.loginfo(f"PERFORMANCE METRICS - {method_name.upper()} SEGMENTATION")
         rospy.loginfo("=" * 80)
-        rospy.loginfo(f"⏱️  Time: {elapsed_time*1000:.2f} ms ({elapsed_time:.3f} s)")
+        rospy.loginfo(f"Time: {elapsed_time*1000:.2f} ms ({elapsed_time:.3f} s)")
         
         if gpu_info:
-            rospy.loginfo(f"🎮 GPU Memory: {gpu_info['memory_allocated_gb']:.2f} GB / {gpu_info['memory_total_gb']:.2f} GB ({gpu_info['memory_allocated_pct']:.1f}%)")
-            rospy.loginfo(f"🎮 GPU Reserved: {gpu_info['memory_reserved_gb']:.2f} GB ({gpu_info['memory_reserved_pct']:.1f}%)")
+            rospy.loginfo(f"GPU Memory: {gpu_info['memory_allocated_gb']:.2f} GB / {gpu_info['memory_total_gb']:.2f} GB ({gpu_info['memory_allocated_pct']:.1f}%)")
+            rospy.loginfo(f"GPU Reserved: {gpu_info['memory_reserved_gb']:.2f} GB ({gpu_info['memory_reserved_pct']:.1f}%)")
             if gpu_info['gpu_util_pct'] is not None:
-                rospy.loginfo(f"🎮 GPU Utilization: {gpu_info['gpu_util_pct']:.1f}%")
+                rospy.loginfo(f"GPU Utilization: {gpu_info['gpu_util_pct']:.1f}%")
         
         if cpu_info:
-            rospy.loginfo(f"💻 CPU (Process): {cpu_info['cpu_percent']:.1f}%")
-            rospy.loginfo(f"💻 CPU (System): {cpu_info['cpu_system']:.1f}%")
-            rospy.loginfo(f"💻 Memory (Process): {cpu_info['memory_mb']:.1f} MB")
+            rospy.loginfo(f"CPU (Process): {cpu_info['cpu_percent']:.1f}%")
+            rospy.loginfo(f"CPU (System): {cpu_info['cpu_system']:.1f}%")
+            rospy.loginfo(f"Memory (Process): {cpu_info['memory_mb']:.1f} MB")
         
         rospy.loginfo("=" * 80)
     
@@ -702,9 +694,7 @@ class SAMSegmentationNode:
     
     def image_callback(self, rgb_msg):
         """Callback for RGB image."""
-        # CRITICAL: Store the original RGB image header (timestamp and frame_id)
-        # The mask MUST use the same timestamp as the RGB image it was generated from
-        # This ensures proper synchronization with RGB/depth images in FoundationPose
+        # Store original header - mask needs same timestamp as RGB
         original_header = rgb_msg.header
         
         # Get initial resource usage
@@ -774,7 +764,7 @@ class SAMSegmentationNode:
             # Save metrics to file
             self._save_metrics(elapsed_time, gpu_info, cpu_info)
             
-            # Publish mask with ORIGINAL RGB timestamp (CRITICAL for synchronization)
+            # Publish mask with original RGB timestamp
             mask_msg = self.numpy_to_ros_image(
                 mask_uint8,
                 encoding='mono8',

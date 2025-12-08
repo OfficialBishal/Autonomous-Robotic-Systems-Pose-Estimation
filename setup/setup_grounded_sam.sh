@@ -112,7 +112,7 @@ cd GroundingDINO
 
 # Patch PyTorch to bypass CUDA version check BEFORE installation
 echo "  Patching PyTorch to bypass CUDA version check..."
-if ! python "$HOME/hsr_robocanes_omniverse/src/final-project-OfficialBishal/scripts/patch_pytorch_cuda_check.py"; then
+if ! python "$HOME/hsr_robocanes_omniverse/src/final-project-OfficialBishal/setup/patch_pytorch_cuda_check.py"; then
     echo "  ERROR: Failed to patch PyTorch - this is required for installation"
     echo "  Please check the error above and fix manually if needed"
     exit 1

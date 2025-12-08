@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 """
-Grounded SAM Segmentation ROS Node
-
-Subscribes to RGB images, uses Grounding DINO + SAM to generate object masks,
-and publishes masks for FoundationPose pose estimation.
+Grounded SAM segmentation ROS node.
 """
 
-# Imports
-
-# Standard library
 import os
 import sys
 import time
@@ -22,7 +16,6 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
-# ROS
 import rospy
 from sensor_msgs.msg import Image
 
@@ -57,8 +50,7 @@ class GroundedSAMSegmentationNode:
     """
     Grounded SAM Segmentation ROS Node
     
-    Subscribes to RGB camera topic, performs object detection using Grounding DINO,
-    generates segmentation masks using SAM, and publishes masks for FoundationPose.
+    Uses Grounding DINO + SAM for open-vocabulary object detection and segmentation.
     """
     
     def __init__(self):
@@ -93,7 +85,6 @@ class GroundedSAMSegmentationNode:
         rospy.loginfo(f"Publishing mask to: {self.mask_topic}")
         rospy.loginfo(f"Text prompt: {self.text_prompt}")
     
-    # Initialization Methods
     
     def _load_parameters(self):
         """Load ROS parameters from config file."""
@@ -307,14 +298,14 @@ class GroundedSAMSegmentationNode:
             img_array: numpy.ndarray image
             encoding: ROS image encoding (e.g., 'mono8', 'rgb8')
             frame_id: Frame ID for header (used if header is None)
-            header: ROS message header to copy timestamp and frame_id from (CRITICAL for synchronization)
+            header: ROS message header to copy timestamp and frame_id from
         
         Returns:
             sensor_msgs.msg.Image: ROS Image message
         """
         img_msg = Image()
         if header is not None:
-            # CRITICAL: Use the original header timestamp and frame_id for proper synchronization
+            # Use the original header timestamp and frame_id for proper synchronization
             img_msg.header.stamp = header.stamp
             img_msg.header.frame_id = header.frame_id
         else:
@@ -495,18 +486,18 @@ class GroundedSAMSegmentationNode:
         rospy.loginfo("=" * 80)
         rospy.loginfo(f"PERFORMANCE METRICS - {method_name.upper()}")
         rospy.loginfo("=" * 80)
-        rospy.loginfo(f"⏱️  Time: {elapsed_time*1000:.2f} ms ({elapsed_time:.3f} s)")
+        rospy.loginfo(f"Time: {elapsed_time*1000:.2f} ms ({elapsed_time:.3f} s)")
         
         if gpu_info:
-            rospy.loginfo(f"🎮 GPU Memory: {gpu_info['memory_allocated_gb']:.2f} GB / {gpu_info['memory_total_gb']:.2f} GB ({gpu_info['memory_allocated_pct']:.1f}%)")
-            rospy.loginfo(f"🎮 GPU Reserved: {gpu_info['memory_reserved_gb']:.2f} GB ({gpu_info['memory_reserved_pct']:.1f}%)")
+            rospy.loginfo(f"GPU Memory: {gpu_info['memory_allocated_gb']:.2f} GB / {gpu_info['memory_total_gb']:.2f} GB ({gpu_info['memory_allocated_pct']:.1f}%)")
+            rospy.loginfo(f"GPU Reserved: {gpu_info['memory_reserved_gb']:.2f} GB ({gpu_info['memory_reserved_pct']:.1f}%)")
             if gpu_info['gpu_util_pct'] is not None:
-                rospy.loginfo(f"🎮 GPU Utilization: {gpu_info['gpu_util_pct']:.1f}%")
+                rospy.loginfo(f"GPU Utilization: {gpu_info['gpu_util_pct']:.1f}%")
         
         if cpu_info:
-            rospy.loginfo(f"💻 CPU (Process): {cpu_info['cpu_percent']:.1f}%")
-            rospy.loginfo(f"💻 CPU (System): {cpu_info['cpu_system']:.1f}%")
-            rospy.loginfo(f"💻 Memory (Process): {cpu_info['memory_mb']:.1f} MB")
+            rospy.loginfo(f"CPU (Process): {cpu_info['cpu_percent']:.1f}%")
+            rospy.loginfo(f"CPU (System): {cpu_info['cpu_system']:.1f}%")
+            rospy.loginfo(f"Memory (Process): {cpu_info['memory_mb']:.1f} MB")
         
         rospy.loginfo("=" * 80)
     
@@ -546,7 +537,7 @@ class GroundedSAMSegmentationNode:
             
             rospy.loginfo_throttle(5.0, f"Detected {boxes_filt.size(0)} objects: {pred_phrases}")
             
-            # CRITICAL: Filter detections to only accept valid object detections
+            # Filter to only valid object detections
             # We pass the prompt to Grounding DINO, and it returns detected phrases
             # We filter to only accept: "cracker box", "craker box" (typo), "red cracker box", or "red box" (failsafe)
             # Reject: standalone "box", "table", or tokenization artifacts
@@ -753,14 +744,11 @@ class GroundedSAMSegmentationNode:
             rospy.logerr(traceback.format_exc())
             return None
     
-    # ROS Callbacks
     
     def image_callback(self, img_msg):
         """Callback for RGB image messages."""
         try:
-            # CRITICAL: Store the original RGB image header (timestamp and frame_id)
-            # The mask MUST use the same timestamp as the RGB image it was generated from
-            # This ensures proper synchronization with RGB/depth images in FoundationPose
+            # Store original header - mask needs same timestamp as RGB
             original_header = img_msg.header
             
             # Convert ROS image to numpy
@@ -776,7 +764,7 @@ class GroundedSAMSegmentationNode:
                 self.mask_pub.publish(mask_msg)
                 return
             
-            # Publish mask with ORIGINAL RGB timestamp (CRITICAL for synchronization)
+            # Publish mask with original RGB timestamp
             mask_msg = self.numpy_to_ros_image(mask, encoding='mono8', frame_id=self.frame_id, header=original_header)
             self.mask_pub.publish(mask_msg)
             

@@ -177,62 +177,65 @@ endif()
 ## Declare a C++ executable
 ## With catkin_make all packages are built within a single CMake context
 ## The recommended prefix ensures that target names across packages don't collide
-add_executable(opencv_pose_estimation_node 
-  src/opencv_pose_estimation_node.cpp
-  include/opencv_pnp/Model.cpp
-  include/opencv_pnp/RobustMatcher.cpp
-  include/opencv_pnp/PnPProblem.cpp
-  include/opencv_pnp/Utils.cpp
-  include/opencv_pnp/Mesh.cpp
-  include/opencv_pnp/CsvReader.cpp
-  include/opencv_pnp/CsvWriter.cpp
-  include/opencv_pnp/ModelRegistration.cpp
-)
 
-add_executable(opencv_model_registration_node 
-  src/opencv_model_registration_node.cpp
-  include/opencv_pnp/Model.cpp
-  include/opencv_pnp/RobustMatcher.cpp
-  include/opencv_pnp/PnPProblem.cpp
-  include/opencv_pnp/Utils.cpp
-  include/opencv_pnp/Mesh.cpp
-  include/opencv_pnp/CsvReader.cpp
-  include/opencv_pnp/CsvWriter.cpp
-  include/opencv_pnp/ModelRegistration.cpp
-)
+# OpenCV pose estimation nodes - STASHED (files moved to stashed/ directory)
+# Uncomment and update paths if you want to restore these nodes
+# add_executable(opencv_pose_estimation_node 
+#   stashed/src/opencv_pose_estimation_node.cpp
+#   stashed/include/opencv_pnp/Model.cpp
+#   stashed/include/opencv_pnp/RobustMatcher.cpp
+#   stashed/include/opencv_pnp/PnPProblem.cpp
+#   stashed/include/opencv_pnp/Utils.cpp
+#   stashed/include/opencv_pnp/Mesh.cpp
+#   stashed/include/opencv_pnp/CsvReader.cpp
+#   stashed/include/opencv_pnp/CsvWriter.cpp
+#   stashed/include/opencv_pnp/ModelRegistration.cpp
+# )
 
-## Add cmake target dependencies of the executables
-add_dependencies(opencv_pose_estimation_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
-add_dependencies(opencv_model_registration_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+# add_executable(opencv_model_registration_node 
+#   stashed/src/opencv_model_registration_node.cpp
+#   stashed/include/opencv_pnp/Model.cpp
+#   stashed/include/opencv_pnp/RobustMatcher.cpp
+#   stashed/include/opencv_pnp/PnPProblem.cpp
+#   stashed/include/opencv_pnp/Utils.cpp
+#   stashed/include/opencv_pnp/Mesh.cpp
+#   stashed/include/opencv_pnp/CsvReader.cpp
+#   stashed/include/opencv_pnp/CsvWriter.cpp
+#   stashed/include/opencv_pnp/ModelRegistration.cpp
+# )
 
-## Specify libraries to link a library or executable target against
-target_link_libraries(opencv_pose_estimation_node
-  ${catkin_LIBRARIES}
-  ${OpenCV_LIBS}
-)
+# ## Add cmake target dependencies of the executables
+# add_dependencies(opencv_pose_estimation_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+# add_dependencies(opencv_model_registration_node ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
-target_link_libraries(opencv_model_registration_node
-  ${catkin_LIBRARIES}
-  ${OpenCV_LIBS}
-)
+# ## Specify libraries to link a library or executable target against
+# target_link_libraries(opencv_pose_estimation_node
+#   ${catkin_LIBRARIES}
+#   ${OpenCV_LIBS}
+# )
 
-# Link yaml-cpp library - try all possible ways
-if(YAML_CPP_FOUND)
-    if(YAML_CPP_LIBRARIES)
-        target_link_libraries(opencv_pose_estimation_node ${YAML_CPP_LIBRARIES})
-    else()
-        target_link_libraries(opencv_pose_estimation_node yaml-cpp)
-    endif()
-elseif(yaml-cpp_FOUND)
-    if(yaml-cpp_LIBRARIES)
-        target_link_libraries(opencv_pose_estimation_node ${yaml-cpp_LIBRARIES})
-    else()
-        target_link_libraries(opencv_pose_estimation_node yaml-cpp)
-    endif()
-endif()
-# Always try to link yaml-cpp (fallback)
-target_link_libraries(opencv_pose_estimation_node yaml-cpp)
-target_link_libraries(opencv_model_registration_node yaml-cpp)
+# target_link_libraries(opencv_model_registration_node
+#   ${catkin_LIBRARIES}
+#   ${OpenCV_LIBS}
+# )
+
+# # Link yaml-cpp library - try all possible ways
+# if(YAML_CPP_FOUND)
+#     if(YAML_CPP_LIBRARIES)
+#         target_link_libraries(opencv_pose_estimation_node ${YAML_CPP_LIBRARIES})
+#     else()
+#         target_link_libraries(opencv_pose_estimation_node yaml-cpp)
+#     endif()
+# elseif(yaml-cpp_FOUND)
+#     if(yaml-cpp_LIBRARIES)
+#         target_link_libraries(opencv_pose_estimation_node ${yaml-cpp_LIBRARIES})
+#     else()
+#         target_link_libraries(opencv_pose_estimation_node yaml-cpp)
+#     endif()
+# endif()
+# # Always try to link yaml-cpp (fallback)
+# target_link_libraries(opencv_pose_estimation_node yaml-cpp)
+# target_link_libraries(opencv_model_registration_node yaml-cpp)
 
 #############
 ## Install ##

@@ -18,10 +18,10 @@
   
   <!-- FoundationPose Pose Estimation node -->
   <!-- Note: This node requires the foundationpose conda environment -->
-  <!-- Use the wrapper script: scripts/run_foundationpose.sh -->
+  <!-- Use the wrapper script: scripts/wrappers/run_foundationpose.sh -->
   <node name="foundationpose_pose_estimation" 
         pkg="final-project-OfficialBishal" 
-        type="run_foundationpose.sh" 
+        type="wrappers/run_foundationpose.sh" 
         output="screen">
     <!-- Load config file for parameters (including object_name) -->
     <rosparam file="$(find final-project-OfficialBishal)/config/foundationpose_config.yaml" command="load" />

@@ -160,12 +160,12 @@ Both nodes use wrapper scripts that:
 3. **Activate conda environment** - Gets dependencies
 4. **Set PYTHONPATH** - Adds ROS Python packages so conda Python can import them
 
-**FoundationPose wrapper** (`scripts/run_foundationpose.sh`):
+**FoundationPose wrapper** (`scripts/wrappers/run_foundationpose.sh`):
 - Activates `foundationpose` conda environment
 - Sets up libffi to avoid cv_bridge conflicts
 - Adds FoundationPose to PYTHONPATH
 
-**SAM wrapper** (`scripts/run_sam_segmentation.sh`):
+**SAM wrapper** (`scripts/wrappers/run_sam_segmentation.sh`):
 - Activates `sam` conda environment
 - Sets up ROS integration
 - Simpler (no libffi issues)
@@ -302,14 +302,14 @@ To modify configuration, just edit the config file and restart the launch file. 
 - Code: `~/hsr_robocanes_omniverse/src/FoundationPose/`
 - Conda Environment: `~/.conda/envs/foundationpose/`
 - ROS Node: `~/hsr_robocanes_omniverse/src/final-project-OfficialBishal/scripts/foundationpose_pose_estimation_node.py`
-- Wrapper Script: `~/hsr_robocanes_omniverse/src/final-project-OfficialBishal/scripts/run_foundationpose.sh`
+- Wrapper Script: `~/hsr_robocanes_omniverse/src/final-project-OfficialBishal/scripts/wrappers/run_foundationpose.sh`
 
 ### SAM
 - Repository: `~/hsr_robocanes_omniverse/segment-anything/`
 - Checkpoints: `~/hsr_robocanes_omniverse/segment-anything/checkpoints/`
 - Conda Environment: `~/.conda/envs/sam/`
 - ROS Node: `~/hsr_robocanes_omniverse/src/final-project-OfficialBishal/scripts/sam_segmentation_node.py`
-- Wrapper Script: `~/hsr_robocanes_omniverse/src/final-project-OfficialBishal/scripts/run_sam_segmentation.sh`
+- Wrapper Script: `~/hsr_robocanes_omniverse/src/final-project-OfficialBishal/scripts/wrappers/run_sam_segmentation.sh`
 
 ### ROS
 - ROS Python packages: `/opt/ros/noetic/lib/python3/dist-packages/`

@@ -142,7 +142,7 @@ If you get compilation errors:
 
 If you need CUDA extensions for maximum performance:
 1. **Check CUDA_HOME**: `echo $CUDA_HOME` (should point to your CUDA installation)
-2. **Manually patch PyTorch**: Run `python scripts/patch_pytorch_cuda_check.py` to bypass version check
+2. **Manually patch PyTorch**: Run `python setup/patch_pytorch_cuda_check.py` to bypass version check
 3. **Reinstall with CUDA**: `export BUILD_WITH_CUDA=True && pip install --no-build-isolation -e GroundingDINO`
 
 ### Import Errors

@@ -9,7 +9,7 @@
   -->
   <node name="pick_and_place" 
         pkg="final-project-OfficialBishal" 
-        type="run_pick_and_place.sh" 
+        type="wrappers/run_pick_and_place.sh" 
         output="screen">
     <!-- Load config file into this node's namespace -->
     <rosparam file="$(find final-project-OfficialBishal)/config/foundationpose_config.yaml" command="load" />

@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-Circle Table Mover
-
-Moves the HSR robot in a circle around the table to test pose estimation
-from different viewing angles.
+Moves robot in circle around table for testing pose estimation.
 """
 
 import math
@@ -56,7 +53,7 @@ class CircleTableMover:
         rospy.loginfo("Waiting for TF transforms to be available...")
         try:
             self.tf_listener.waitForTransform('map', 'base_link', rospy.Time(0), rospy.Duration(10.0))
-            rospy.loginfo("✓ TF transforms available")
+            rospy.loginfo("TF transforms available")
         except Exception as e:
             rospy.logwarn(f"TF transform wait timed out: {e}")
             rospy.logwarn("Continuing anyway...")
@@ -226,11 +223,11 @@ class CircleTableMover:
             tw = Twist()
             
             # Strategy: Move toward waypoint first, then adjust orientation to face table
-            # This ensures we follow the circular path, not go straight to table
+            # Follow circular path, not straight to table
             
             # If angle error to waypoint is large, turn toward waypoint first
             if abs(waypoint_ang_err) > 0.25:  # Large angle error to waypoint
-                # Turn toward waypoint (this is critical for following the circle)
+                # Turn toward waypoint to follow the circle
                 tw.angular.z = max(-self.angular_speed, min(self.angular_speed, 2.0 * waypoint_ang_err))
                 tw.linear.x = 0.0  # Don't move while turning toward waypoint
             else:
@@ -334,7 +331,7 @@ class CircleTableMover:
             rospy.logerr("Could not determine starting waypoint index! Aborting.")
             return
         
-        rospy.loginfo(f"✓ Reached starting position (waypoint #{start_idx + 1})")
+        rospy.loginfo(f"Reached starting position (waypoint #{start_idx + 1})")
         rospy.sleep(1.0)  # Brief pause at starting position
         
         # Create waypoint sequence (only need to do this once, will repeat)
@@ -407,7 +404,7 @@ class CircleTableMover:
                             rospy.sleep(0.1)
                             table_ang_err = self.calculate_angle_to_table()
                         self.stop_robot()
-                        rospy.loginfo("✓ Robot is facing table center")
+                        rospy.loginfo("Robot is facing table center")
                     
                     # Wait at waypoint to allow pose estimation to process
                     rospy.loginfo(f"Waiting {wait_at_waypoint} seconds at waypoint for pose estimation...")

@@ -1,15 +1,14 @@
-# Final Project - Object Pose Estimation and Manipulation
+# Final Project - Object Pose Estimation
 
-This package provides 6D pose estimation and manipulation for robotic object manipulation using FoundationPose, SAM (Segment Anything Model), and MoveIt for motion planning.
+This package provides 6D pose estimation for robotic object manipulation using FoundationPose, SAM (Segment Anything Model), and Grounded SAM for segmentation.
 
 ## Overview
 
-This system integrates multiple state-of-the-art components for accurate object pose estimation and manipulation:
+This system integrates multiple state-of-the-art components for accurate object pose estimation:
 - **FoundationPose**: 6D pose estimation from RGB-D images
 - **SAM (Segment Anything Model)**: High-quality object segmentation
 - **Grounded SAM**: Open-vocabulary object detection and segmentation (alternative to YOLO + SAM)
 - **YOLO**: Object detection for automatic segmentation
-- **MoveIt**: Motion planning and execution for pick-and-place operations
 
 ## Quick Start
 
@@ -55,15 +54,6 @@ roslaunch final-project-OfficialBishal foundationpose_with_grounded_sam.launch
 roslaunch final-project-OfficialBishal foundationpose_pose_estimation.launch
 ```
 
-### 3. Run Pick and Place (Optional)
-
-After the pose estimation system is running, launch the pick-and-place node:
-
-```bash
-# Launch pick and place node (runs in system ROS environment)
-roslaunch final-project-OfficialBishal pick_and_place.launch
-```
-
 **Configuration**: All parameters are in `config/foundationpose_config.yaml`. No need to pass launch arguments.
 
 ## Main Components
@@ -89,13 +79,6 @@ roslaunch final-project-OfficialBishal pick_and_place.launch
   - Publishes poses with quality checking
   - Runs in `foundationpose` conda environment
 
-#### Manipulation Node
-- **`pick_and_place_node_old.py`** - Pick and place execution
-  - Subscribes to pose estimates from FoundationPose
-  - Uses MoveIt for motion planning
-  - Implements state machine: IDLE → PREPARING → APPROACHING → GRASPING → LIFTING → COMPLETE
-  - Calculates top surface position from object center pose
-  - Runs in system ROS environment (not conda)
 
 ### Launch Files
 
@@ -111,11 +94,7 @@ roslaunch final-project-OfficialBishal pick_and_place.launch
   - Launches FoundationPose node only
   - Requires external mask topic
 
-- **`pick_and_place.launch`** - Pick and place node
-  - Launches pick and place node separately
-  - Should be run after pose estimation system is running
-
-- **`opencv_pose_estimation.launch`** - OpenCV-based pose estimation (alternative)
+- **`opencv_pose_estimation.launch`** - OpenCV-based pose estimation (alternative, stashed)
 - **`dope_final_project.launch`** - DOPE pose estimation (alternative)
 
 ### Configuration
@@ -127,7 +106,6 @@ roslaunch final-project-OfficialBishal pick_and_place.launch
   - FoundationPose parameters (refinement iterations, debug level)
   - SAM/Grounded SAM parameters (model type, checkpoint paths, strategies)
   - YOLO parameters (model path, confidence thresholds)
-  - Pick and place parameters (approach height, object dimensions, planning settings)
   - Pose quality thresholds
   - Coordinate frame correction settings
 
@@ -140,13 +118,15 @@ roslaunch final-project-OfficialBishal pick_and_place.launch
 - **`readmes/README_GROUNDED_SAM_SETUP.md`** - Grounded SAM installation guide
 - **`docs/POSE_ESTIMATION_IMPROVEMENTS.md`** - Pose estimation accuracy analysis and improvements
 
-### Utility Scripts
+### Development Tools
 
-Located in `scripts/utilities/` (not required for main pipeline):
+Located in `tools/` (optional, not required for main pipeline):
 - `analyze_mesh_simple.py` - Analyze mesh file properties
 - `generate_model_from_image.py` - Generate 3D model from image
 - `generate_model_from_mesh.py` - Generate model from mesh file
 - `generate_mustard_model.py` - Generate mustard bottle model
+
+These are standalone development/testing tools and are not used by the main system.
 
 ### Metrics and Analysis
 
@@ -182,14 +162,6 @@ Located in `scripts/utilities/` (not required for main pipeline):
 - **Better for custom objects** - Works with objects not in COCO dataset
 - **Single integrated solution** - Grounding DINO + SAM in one pipeline
 
-### Pick and Place
-- **State machine implementation** - Robust error handling and recovery
-- **Top surface calculation** - Automatically calculates object top surface from center pose
-- **Configurable approach heights** - Adjustable for different object sizes
-- **MoveIt integration** - Uses RRTConnect planner for motion planning
-- **Pose consistency checking** - Buffers multiple poses before picking
-- **Auto-trigger option** - Automatically starts picking when pose received
-- **Manual trigger support** - Can be triggered via ROS topic
 
 ## Requirements
 
@@ -197,7 +169,6 @@ Located in `scripts/utilities/` (not required for main pipeline):
 - **ROS1 Noetic**
 - **NVIDIA GPU with CUDA support**
 - **Python 3.9** (for conda environments)
-- **MoveIt** (for pick and place)
 
 ### Conda Environments
 - **`sam`** - SAM segmentation with YOLO
@@ -230,16 +201,16 @@ final-project-OfficialBishal/
 │   ├── sam_segmentation_node.py      # SAM + YOLO segmentation
 │   ├── grounded_sam_segmentation_node.py  # Grounded SAM segmentation
 │   ├── foundationpose_pose_estimation_node.py  # FoundationPose pose estimation
-│   ├── pick_and_place_node_old.py    # Pick and place execution
-│   ├── run_sam_segmentation.sh        # Wrapper script for SAM node
-│   ├── run_grounded_sam_segmentation.sh  # Wrapper script for Grounded SAM
-│   ├── run_foundationpose.sh          # Wrapper script for FoundationPose
-│   ├── run_pick_and_place.sh          # Wrapper script for pick and place
-│   └── utilities/                     # Utility scripts (optional)
-│       ├── analyze_mesh_simple.py
-│       ├── generate_model_from_image.py
-│       ├── generate_model_from_mesh.py
-│       └── generate_mustard_model.py
+│   └── wrappers/                      # Wrapper scripts (conda environment setup)
+│       ├── run_sam_segmentation.sh        # Wrapper script for SAM node
+│       ├── run_grounded_sam_segmentation.sh  # Wrapper script for Grounded SAM
+│       ├── run_foundationpose.sh          # Wrapper script for FoundationPose
+│       └── run_pick_and_place.sh          # Wrapper script for pick and place
+├── tools/                              # Development tools (optional)
+│   ├── analyze_mesh_simple.py
+│   ├── generate_model_from_image.py
+│   ├── generate_model_from_mesh.py
+│   └── generate_mustard_model.py
 ├── setup/                             # Setup scripts
 │   ├── setup_sam.sh                   # Setup SAM environment
 │   └── setup_grounded_sam.sh          # Setup Grounded SAM environment
@@ -247,8 +218,7 @@ final-project-OfficialBishal/
 │   ├── foundationpose_with_sam.launch         # Main launch (SAM + YOLO)
 │   ├── foundationpose_with_grounded_sam.launch  # Launch (Grounded SAM)
 │   ├── foundationpose_pose_estimation.launch  # FoundationPose only
-│   ├── pick_and_place.launch          # Pick and place node
-│   ├── opencv_pose_estimation.launch  # OpenCV pose estimation
+│   ├── opencv_pose_estimation.launch  # OpenCV pose estimation (stashed)
 │   └── dope_final_project.launch      # DOPE pose estimation
 ├── config/                            # Configuration files
 │   ├── foundationpose_config.yaml     # Main configuration (all parameters)
@@ -304,18 +274,6 @@ rostopic echo /foundationpose_pose_estimation/pose
 roslaunch final-project-OfficialBishal foundationpose_with_grounded_sam.launch
 ```
 
-### Example 3: Full Pick and Place Pipeline
-
-```bash
-# Terminal 1: Launch pose estimation
-roslaunch final-project-OfficialBishal foundationpose_with_sam.launch
-
-# Terminal 2: Launch pick and place (after pose estimation is running)
-roslaunch final-project-OfficialBishal pick_and_place.launch
-
-# The pick and place node will automatically start picking when it receives poses
-# Or trigger manually: rostopic pub /pick_and_place/trigger_pick std_msgs/Bool "data: true"
-```
 
 ## Configuration Guide
 
@@ -340,17 +298,6 @@ publish_quality:
   publish_orientation_error_threshold: 45.0  # degrees
 ```
 
-### Configuring Pick and Place
-
-```yaml
-pick:
-  approach_height: 0.15              # Height above object top surface (meters)
-  grasp_height_offset: 0.02         # Offset from top surface for grasp (meters)
-  object_dimensions: [0.164, 0.213, 0.072]  # [width, depth, height] in meters
-  auto_pick: true                   # Auto-trigger when pose received
-  planning_timeout: 120.0            # Motion planning timeout (seconds)
-```
-
 ### Switching Segmentation Strategy
 
 ```yaml
@@ -365,11 +312,6 @@ sam:
 - **Verify mesh file**: Mesh should match object dimensions
 - **Adjust quality thresholds**: Lower thresholds if poses not publishing
 - **Check camera topics**: Verify RGB-D topics are publishing
-
-### Pick and Place Issues
-- **MoveIt not responding**: Check robot state publisher is running
-- **Planning failures**: Increase `planning_timeout` or adjust `approach_height`
-- **Gripper not closing**: Check gripper topic and hardware connection
 
 ### Environment Issues
 - **Import errors**: Verify conda environment is activated
@@ -703,4 +645,34 @@ This generates:
 - **YOLO**: https://github.com/ultralytics/ultralytics
 
 For detailed setup instructions, see `readmes/README_FOUNDATIONPOSE_SETUP.md`.
+
+## Attempted Features
+
+### Pick and Place
+
+A pick-and-place implementation was attempted but not successfully completed. The following components were developed but encountered issues during testing:
+
+**What Was Attempted:**
+- **`pick_and_place_node.py`** - Pick and place execution node
+  - Subscribed to pose estimates from FoundationPose
+  - Used MoveIt for motion planning
+  - Implemented state machine: IDLE → PREPARING → APPROACHING → GRASPING → LIFTING → COMPLETE
+  - Calculated top surface position from object center pose
+  - Integrated with HSR robot gripper and arm control
+
+**Launch File:**
+- **`pick_and_place.launch`** - Launch file for pick and place node
+
+**Configuration:**
+- Pick and place parameters were included in `config/foundationpose_config.yaml`:
+  - Approach height, grasp height offset
+  - Object dimensions
+  - Planning timeout settings
+
+**Status:**
+- Implementation was attempted but failed during testing
+- The node and launch file remain in the package for reference
+- Not recommended for use in the current state
+
+**Note:** The pose estimation system works independently and can be used without pick and place functionality.
 
