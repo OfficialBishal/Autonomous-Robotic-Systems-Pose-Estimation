@@ -17,8 +17,40 @@ import os
 import json
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib
 import pandas as pd
 from pathlib import Path
+
+# Try to import seaborn for better styling (optional)
+try:
+    import seaborn as sns
+    HAS_SEABORN = True
+    # Set seaborn style for better-looking plots
+    sns.set_style("whitegrid")
+    sns.set_palette("husl")
+except ImportError:
+    HAS_SEABORN = False
+    print("Note: seaborn not available, using matplotlib defaults")
+
+# Set matplotlib parameters for better-looking plots
+plt.rcParams['figure.dpi'] = 100
+plt.rcParams['savefig.dpi'] = 300
+plt.rcParams['font.size'] = 11
+plt.rcParams['axes.labelsize'] = 12
+plt.rcParams['axes.titlesize'] = 13
+plt.rcParams['xtick.labelsize'] = 10
+plt.rcParams['ytick.labelsize'] = 10
+plt.rcParams['legend.fontsize'] = 10
+plt.rcParams['figure.titlesize'] = 14
+plt.rcParams['grid.alpha'] = 0.3
+plt.rcParams['grid.linestyle'] = '--'
+
+# Color palette for implementations
+COLORS = {
+    "FoundationPose": "#2E86AB",  # Blue
+    "Grounded SAM": "#A23B72",    # Purple
+    "YOLO+SAM": "#F18F01"          # Orange
+}
 
 # Configuration
 SCRIPT_DIR = Path(__file__).parent
@@ -120,44 +152,75 @@ def plot_distributions(all_data):
     """Create distribution plots (histograms) for each metric."""
     print("Generating distribution plots...")
     
+    # Reorder implementations: YOLO+SAM, Grounded SAM, FoundationPose
+    preferred_order = ["YOLO+SAM", "Grounded SAM", "FoundationPose"]
+    ordered_data = sorted(all_data.items(), 
+                         key=lambda x: preferred_order.index(x[0]) if x[0] in preferred_order else 999)
+    
     for metric_key, metric_info in METRICS.items():
-        fig, axes = plt.subplots(1, len(all_data), figsize=(6 * len(all_data), 5))
-        if len(all_data) == 1:
+        fig, axes = plt.subplots(1, len(ordered_data), figsize=(6 * len(ordered_data), 5))
+        if len(ordered_data) == 1:
             axes = [axes]
         
-        for idx, (name, data) in enumerate(all_data.items()):
+        fig.suptitle(f'Distribution: {metric_info["label"]}', fontsize=14, fontweight='bold', y=1.02)
+        
+        for idx, (name, data) in enumerate(ordered_data):
             values = extract_metric_values(data, metric_key)
             
             if not values:
                 axes[idx].text(0.5, 0.5, f'No data for {name}', 
-                              ha='center', va='center', transform=axes[idx].transAxes)
-                axes[idx].set_title(f'{name}\n{metric_info["label"]}')
+                              ha='center', va='center', transform=axes[idx].transAxes,
+                              fontsize=12, style='italic')
+                axes[idx].set_title(f'{name}', fontweight='bold')
+                axes[idx].set_facecolor('#f8f8f8')
                 continue
             
-            # Create histogram
-            axes[idx].hist(values, bins=30, edgecolor='black', alpha=0.7)
-            axes[idx].set_title(f'{name}\n{metric_info["label"]}')
-            axes[idx].set_xlabel(metric_info["unit"])
-            axes[idx].set_ylabel('Frequency')
-            axes[idx].grid(True, alpha=0.3)
+            # Create histogram with better styling
+            color = COLORS.get(name, None)
+            if color is None:
+                # Fallback color palette if name not in COLORS
+                if HAS_SEABORN:
+                    color = sns.color_palette("husl")[idx]
+                else:
+                    colors_list = ['#2E86AB', '#A23B72', '#F18F01', '#06A77D', '#D4A574']
+                    color = colors_list[idx % len(colors_list)]
+            axes[idx].hist(values, bins=30, edgecolor='white', linewidth=1.2, 
+                         alpha=0.8, color=color, density=False)
             
-            # Add statistics text
+            # Add vertical lines for mean and median
             mean_val = np.mean(values)
             median_val = np.median(values)
+            axes[idx].axvline(mean_val, color='red', linestyle='--', linewidth=2, 
+                            label=f'Mean: {mean_val:.2f}')
+            axes[idx].axvline(median_val, color='green', linestyle='--', linewidth=2, 
+                            label=f'Median: {median_val:.2f}')
+            
+            axes[idx].set_title(f'{name}', fontweight='bold', pad=10)
+            axes[idx].set_xlabel(f'{metric_info["label"]} ({metric_info["unit"]})', fontweight='bold')
+            axes[idx].set_ylabel('Frequency', fontweight='bold')
+            axes[idx].grid(True, alpha=0.3, linestyle='--')
+            
+            # Add statistics text box in upper right
             std_val = np.std(values)
-            stats_text = f'Mean: {mean_val:.2f}\nMedian: {median_val:.2f}\nStd: {std_val:.2f}\nN: {len(values)}'
+            stats_text = f'N: {len(values)}\nMean: {mean_val:.2f}\nMedian: {median_val:.2f}\nStd: {std_val:.2f}'
             axes[idx].text(0.98, 0.98, stats_text, 
                           transform=axes[idx].transAxes,
                           verticalalignment='top',
                           horizontalalignment='right',
-                          bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                          bbox=dict(boxstyle='round', facecolor='white', 
+                                  edgecolor='gray', alpha=0.8, pad=0.5),
+                          fontsize=9, family='monospace')
+            
+            # Add legend in upper left to avoid overlap with stats box
+            axes[idx].legend(loc='upper left', framealpha=0.9, fontsize=9, 
+                           bbox_to_anchor=(0.02, 0.98), frameon=True)
             
             if metric_info["log_scale"]:
                 axes[idx].set_xscale('log')
         
         plt.tight_layout()
         plot_filename = PLOTS_DIR / f"distribution_{metric_key}.png"
-        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
         print(f"  Saved: {plot_filename}")
 
@@ -200,6 +263,11 @@ def plot_comparison_bars(all_data):
         if not implementations:
             continue
         
+        # Reorder implementations: YOLO+SAM, Grounded SAM, FoundationPose
+        preferred_order = ["YOLO+SAM", "Grounded SAM", "FoundationPose"]
+        implementations = sorted(implementations, 
+                                key=lambda x: preferred_order.index(x) if x in preferred_order else 999)
+        
         # For time metrics, include all implementations (even if they only have time data)
         # For GPU/CPU metrics, only include implementations that have those metrics
         if metric_key in ['time_s', 'time_ms']:
@@ -217,28 +285,57 @@ def plot_comparison_bars(all_data):
         
         fig, ax = plt.subplots(figsize=(10, 6))
         x_pos = np.arange(len(implementations))
-        bars = ax.bar(x_pos, means, yerr=stds, capsize=5, alpha=0.7, edgecolor='black')
         
-        ax.set_xlabel('Implementation')
-        ax.set_ylabel(f'{metric_info["label"]} ({metric_info["unit"]})')
-        ax.set_title(f'Average {metric_info["label"]} Comparison')
-        ax.set_xticks(x_pos)
-        ax.set_xticklabels(implementations, rotation=45, ha='right')
-        ax.grid(True, alpha=0.3, axis='y')
+        # Use colors from palette
+        colors = []
+        for i, impl in enumerate(implementations):
+            if impl in COLORS:
+                colors.append(COLORS[impl])
+            elif HAS_SEABORN:
+                colors.append(sns.color_palette("husl")[i])
+            else:
+                colors_list = ['#2E86AB', '#A23B72', '#F18F01', '#06A77D', '#D4A574']
+                colors.append(colors_list[i % len(colors_list)])
         
-        # Add value labels on bars
+        # Create bars with better styling
+        bars = ax.bar(x_pos, means, yerr=stds, capsize=8,
+                     alpha=0.85, edgecolor='black', linewidth=1.5,
+                     color=colors, width=0.6,
+                     error_kw={'elinewidth': 2})
+        
+        # Add value labels on bars with better formatting
         for i, (bar, mean, std) in enumerate(zip(bars, means, stds)):
             height = bar.get_height()
-            ax.text(bar.get_x() + bar.get_width()/2., height + std,
-                   f'{mean:.2f} ± {std:.2f}',
-                   ha='center', va='bottom', fontsize=9)
+            # Position label above error bar
+            label_y = height + std + (max(means) * 0.02)  # Small offset
+            ax.text(bar.get_x() + bar.get_width()/2., label_y,
+                   f'{mean:.2f}\n±{std:.2f}',
+                   ha='center', va='bottom', fontsize=10, fontweight='bold',
+                   bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                           edgecolor='gray', alpha=0.8))
+        
+        ax.set_xlabel('Implementation', fontweight='bold', fontsize=12)
+        ax.set_ylabel(f'{metric_info["label"]} ({metric_info["unit"]})', 
+                     fontweight='bold', fontsize=12)
+        ax.set_title(f'Average {metric_info["label"]} Comparison', 
+                    fontweight='bold', fontsize=13, pad=15)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(implementations, rotation=0, ha='center', fontweight='bold')
+        ax.grid(True, alpha=0.3, axis='y', linestyle='--', linewidth=0.8)
+        ax.set_axisbelow(True)
+        
+        # Remove top and right spines for cleaner look
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_linewidth(1.2)
+        ax.spines['bottom'].set_linewidth(1.2)
         
         if metric_info["log_scale"]:
             ax.set_yscale('log')
         
         plt.tight_layout()
         plot_filename = PLOTS_DIR / f"comparison_{metric_key}.png"
-        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
         print(f"  Saved: {plot_filename}")
 
