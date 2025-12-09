@@ -413,7 +413,7 @@ class GroundedSAMSegmentationNode:
                 
                 # Try to get utilization using pynvml if available
                 gpu_util = None
-                if getattr(self, 'pynvml_initialized', False):
+                if self.pynvml_initialized:
                     try:
                         import pynvml
                         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
@@ -464,6 +464,7 @@ class GroundedSAMSegmentationNode:
                 'time_s': elapsed_time
             }
             
+            # Always include GPU metrics (use 0 if gpu_info is None)
             if gpu_info:
                 metric_entry.update({
                     'gpu_memory_allocated_gb': gpu_info.get('memory_allocated_gb', 0),
@@ -473,12 +474,30 @@ class GroundedSAMSegmentationNode:
                     'gpu_memory_reserved_pct': gpu_info.get('memory_reserved_pct', 0),
                     'gpu_utilization_pct': gpu_info.get('gpu_util_pct', 0) if gpu_info.get('gpu_util_pct') is not None else 0
                 })
+            else:
+                # Include GPU metrics with default values if gpu_info is None
+                metric_entry.update({
+                    'gpu_memory_allocated_gb': 0,
+                    'gpu_memory_reserved_gb': 0,
+                    'gpu_memory_total_gb': 0,
+                    'gpu_memory_allocated_pct': 0,
+                    'gpu_memory_reserved_pct': 0,
+                    'gpu_utilization_pct': 0
+                })
             
+            # Always include CPU metrics (use 0 if cpu_info is None)
             if cpu_info:
                 metric_entry.update({
                     'cpu_process_pct': cpu_info.get('cpu_percent', 0),
                     'cpu_system_pct': cpu_info.get('cpu_system', 0),
                     'memory_mb': cpu_info.get('memory_mb', 0)
+                })
+            else:
+                # Include CPU metrics with default values if cpu_info is None
+                metric_entry.update({
+                    'cpu_process_pct': 0,
+                    'cpu_system_pct': 0,
+                    'memory_mb': 0
                 })
             
             self.metrics_data.append(metric_entry)
