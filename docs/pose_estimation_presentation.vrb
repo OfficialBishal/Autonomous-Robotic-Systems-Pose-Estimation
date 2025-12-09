@@ -1,0 +1,65 @@
+\frametitle{Performance Metrics Collection}
+    \begin{columns}
+        \column{0.5\textwidth}
+        \textbf{GPU Metrics Collection:}
+        \begin{lstlisting}[language=Python, basicstyle=\tiny, breaklines=true]
+def get_gpu_usage(self):
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+        memory_allocated = torch.cuda.memory_allocated(device) / 1024**3
+        memory_reserved = torch.cuda.memory_reserved(device) / 1024**3
+        memory_total = torch.cuda.get_device_properties(device).total_memory / 1024**3
+
+        gpu_util = None
+        if self.pynvml_initialized:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(device)
+            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            gpu_util = util.gpu
+
+        return {
+            'memory_allocated_gb': memory_allocated,
+            'memory_reserved_gb': memory_reserved,
+            'gpu_util_pct': gpu_util
+        }
+        \end{lstlisting}
+        \column{0.5\textwidth}
+        \textbf{CPU Metrics Collection:}
+        \begin{lstlisting}[language=Python, basicstyle=\tiny, breaklines=true]
+def get_cpu_usage(self):
+    process = psutil.Process(os.getpid())
+    cpu_percent = process.cpu_percent(interval=0.1)
+    cpu_system = psutil.cpu_percent(interval=0.1)
+    memory_info = process.memory_info()
+    memory_mb = memory_info.rss / 1024 / 1024
+
+    return {
+        'cpu_percent': cpu_percent,
+        'cpu_system': cpu_system,
+        'memory_mb': memory_mb
+    }
+        \end{lstlisting}
+        \vspace{0.3em}
+        \textbf{Metrics Saving:}
+        \begin{lstlisting}[language=Python, basicstyle=\tiny, breaklines=true]
+def _save_metrics(self, elapsed_time, gpu_info, cpu_info):
+    metric_entry = {
+        'timestamp': rospy.get_time(),
+        'time_s': elapsed_time
+    }
+    if gpu_info:
+        metric_entry.update({
+            'gpu_memory_allocated_gb': gpu_info.get('memory_allocated_gb'),
+            'gpu_utilization_pct': gpu_info.get('gpu_util_pct', 0)
+        })
+    if cpu_info:
+        metric_entry.update({
+            'cpu_process_pct': cpu_info.get('cpu_percent'),
+            'memory_mb': cpu_info.get('memory_mb')
+        })
+    self.metrics_data.append(metric_entry)
+        \end{lstlisting}
+    \end{columns}
+    \vspace{0.3em}
+    \begin{block}{Note}
+        Grounded SAM node includes this code. GPU/CPU metrics are collected but may not have been logged during initial data collection runs.
+    \end{block}

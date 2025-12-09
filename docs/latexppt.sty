@@ -1,0 +1,110 @@
+\mode<presentation>
+
+\newif\ifbeamer@secheader
+\beamer@secheaderfalse
+
+%\DeclareOptionBeamer{secheader}{\beamer@secheadertrue}
+\ProcessOptionsBeamer
+
+%Gives the heading
+\useoutertheme[footline=authorinstitutetitle,subsection=false]{smoothbars}
+
+%% \setbeamertemplate{headline}{
+%%   \leavevmode%
+%%   \hbox{%
+%%     \begin{beamercolorbox}[wd=\paperwidth,ht=2.25ex,dp=1ex,center]{section in head/foot}%
+%%       \usebeamerfont{section in head/foot}\insertsection
+%%     \end{beamercolorbox}%
+%%   }
+%% }
+%% \makeatother
+
+\makeatletter
+\newcommand{\frameofframes}{/}
+\newcommand{\setframeofframes}[1]{\renewcommand{\frameofframes}{#1}}
+
+\setbeamercolor{section in foot}{fg=white, bg=UM}
+\setbeamercolor{subsection in foot}{fg=UM, bg=UMgold}
+
+%% \setbeamercolor{section in head/foot}{bg=UM, fg=white}
+%% \setbeamerfont{section in head/foot}{size=\small,series=\bfseries}
+
+\makeatletter
+\setbeamertemplate{footline}
+{
+  \leavevmode%
+  \hbox{%
+  \begin{beamercolorbox}[wd=.3\paperwidth,ht=2.25ex,dp=1ex,center]{section in foot}%
+    \usebeamerfont{author in head/foot}
+  \end{beamercolorbox}%
+  \begin{beamercolorbox}[wd=.4\paperwidth,ht=2.25ex,dp=1ex,center]{subsection in foot}%
+    \usebeamerfont{title in head/foot}
+  \end{beamercolorbox}%
+  \begin{beamercolorbox}[wd=.3\paperwidth,ht=2.25ex,dp=1ex,right]{section in foot}%
+    \today \hspace*{12ex} \insertframenumber{} / \inserttotalframenumber\hspace*{2ex} 
+  \end{beamercolorbox}}%
+  \vskip0pt%
+}
+\makeatother
+
+%\usecolortheme{dove}
+%\useoutertheme{sidebar}
+\useinnertheme{circles}
+\usefonttheme{professionalfonts}    
+
+%\useoutertheme{default}
+% \useinnertheme[shadow=true]{rounded} 
+\definecolor{LightGrey}{RGB}{228,228,228}
+\definecolor{UM}{RGB}{0,80,48}
+\definecolor{UMgold}{RGB}{244,115,33}
+%\definecolor{MyColor}{RGB}{206,184,136} % Define your custom color here
+% 206/184/136
+\setbeamercolor{footline}{bg=UM}
+\setbeamercolor{frametitle}{bg=LightGrey,fg=UM}
+\setbeamercolor{title}{bg=UM}
+\setbeamerfont{frametitle}{size=\large}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{bibliography item}[text]
+\setbeamertemplate{caption}[numbered]
+
+\setbeamercolor{palette primary}{use=structure,fg=white,bg=structure.fg}
+\setbeamercolor{palette secondary}{use=structure,fg=white,bg=structure.fg!75!black}
+\setbeamercolor{palette tertiary}{use=structure,fg=white,bg=structure.fg!50!black}
+\setbeamercolor{palette quaternary}{fg=white,bg=structure.fg!50!black}
+\setbeamercolor*{sidebar}{use=structure,bg=structure.fg}
+\setbeamercolor{titlelike}{parent=palette primary}
+
+%% try
+\setbeamercolor{block title}{bg=UM,fg=white}
+\setbeamercolor*{block title example}{use={normal text,example text},bg=white,fg=UM}
+\setbeamercolor{fine separation line}{}
+\setbeamercolor{item projected}{fg=white}
+\setbeamercolor{palette sidebar primary}{use=normal text,fg=normal text.fg}
+\setbeamercolor{palette sidebar quaternary}{use=structure,fg=structure.fg}
+\setbeamercolor{palette sidebar secondary}{use=structure,fg=structure.fg}
+\setbeamercolor{palette sidebar tertiary}{use=normal text,fg=normal text.fg}
+%\setbeamercolor{palette sidebar quaternary}{fg=white}
+\setbeamercolor{section in sidebar}{fg=MyColor} % Change color for sections in sidebar
+\setbeamercolor{section in sidebar shaded}{fg=LightGrey}
+\setbeamercolor{subsection in sidebar}{fg=MyColor} % Change color for subsections in sidebar
+\setbeamercolor{subsection in sidebar shaded}{fg=LightGrey}
+\setbeamercolor{separation line}{}
+\setbeamercolor{sidebar}{bg=UM}
+\setbeamercolor{sidebar}{parent=palette primary}
+\setbeamercolor{structure}{fg=UM}
+\setbeamercolor{subsection in head/foot}{bg=LightGrey,fg=UM} % Change color for subsection navigation bar
+\setbeamercolor{section in head/foot}{bg=LightGrey,fg=UM} % Change color for section navigation bar
+
+%% \AtBeginSection[]{
+%%     \begin{frame}
+%%         \tableofcontents[sectionstyle=show/shaded,subsectionstyle=show/shaded/hide,subsubsectionstyle=show/shaded/hide]
+%%     \end{frame}
+%% }
+%% \AtBeginSubsection[]{
+%%     \begin{frame}
+%%         \tableofcontents[sectionstyle=show/shaded,subsectionstyle=show/shaded/hide,subsubsectionstyle=show/shaded/hide]
+%%     \end{frame}
+%% }
+
+\mode
+<all>

@@ -315,12 +315,8 @@ def plot_comparison_bars(all_data):
                            edgecolor='gray', alpha=0.8))
         
         ax.set_xlabel('Implementation', fontweight='bold', fontsize=12)
-        # Only add unit if it's not already in the label
-        if f'({metric_info["unit"]})' not in metric_info["label"]:
-            ylabel = f'{metric_info["label"]} ({metric_info["unit"]})'
-        else:
-            ylabel = metric_info["label"]
-        ax.set_ylabel(ylabel, fontweight='bold', fontsize=12)
+        ax.set_ylabel(f'{metric_info["label"]} ({metric_info["unit"]})', 
+                     fontweight='bold', fontsize=12)
         ax.set_title(f'Average {metric_info["label"]} Comparison', 
                     fontweight='bold', fontsize=13, pad=15)
         ax.set_xticks(x_pos)
