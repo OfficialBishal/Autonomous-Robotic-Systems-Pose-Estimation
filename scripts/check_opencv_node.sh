@@ -25,3 +25,4 @@ rosnode info /opencv_pose_estimation 2>&1 | head -20 || echo "Cannot get node in
 
 
 
+

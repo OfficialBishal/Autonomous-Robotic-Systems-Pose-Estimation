@@ -67,6 +67,15 @@ class GroundedSAMSegmentationNode:
         # Setup ROS communication
         self._setup_ros_communication()
         
+        # Initialize pynvml if available (for GPU utilization monitoring)
+        self.pynvml_initialized = False
+        try:
+            import pynvml
+            pynvml.nvmlInit()
+            self.pynvml_initialized = True
+        except (ImportError, Exception):
+            pass
+        
         # Performance metrics throttling (print every N frames)
         self.performance_print_interval = 10  # Print every 10 frames
         self.frame_counter = 0
@@ -404,7 +413,7 @@ class GroundedSAMSegmentationNode:
                 
                 # Try to get utilization using pynvml if available
                 gpu_util = None
-                if self.pynvml_initialized:
+                if getattr(self, 'pynvml_initialized', False):
                     try:
                         import pynvml
                         handle = pynvml.nvmlDeviceGetHandleByIndex(device)
